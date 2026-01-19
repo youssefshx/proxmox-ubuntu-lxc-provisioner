@@ -1,0 +1,1150 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - MAIN PROVISION PLAYBOOK
+#==============================================================================
+# Provisions Ubuntu LXC containers on Proxmox with three security profiles:
+#
+#   1. unprivileged - Most secure, no device passthrough
+#   2. privileged   - Full device access, no GPU
+#   3. nvidia_gpu   - Full GPU passthrough with NVIDIA drivers
+#
+# FEATURES:
+#   - SSH key-based authentication (no passwords!)
+#   - UFW firewall enabled (SSH + ICMP only by default)
+#   - All telemetry disabled
+#   - Automatic security updates configured
+#   - Full apt update/upgrade on provision
+#   - Outputs ready-to-use Ansible inventory + SSH keys
+#
+# USAGE:
+#   ansible-playbook -i inventories/hosts.ini playbooks/provision.yml \
+#     -e lxc_map_file=examples/my_containers.yml
+#
+# OUTPUT:
+#   - output/<container_hostname>/id_ed25519      (private key)
+#   - output/<container_hostname>/id_ed25519.pub  (public key)
+#   - output/<container_hostname>/hosts.ini       (Ansible inventory)
+#==============================================================================
+
+- name: Provision Ubuntu LXC containers on Proxmox
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+
+  vars:
+    # Default map file; override with: -e lxc_map_file=examples/your_map.yml
+    lxc_map_file: "examples/template.yml"
+
+    # Output directory for SSH keys and inventories (relative to playbook dir)
+    output_base_dir: "{{ playbook_dir }}/../output"
+
+    # Deployment name derived from map file (e.g., "test-suite" from "examples/test-suite.yml")
+    deployment_name: "{{ (lxc_map_file | basename | splitext)[0] }}"
+
+  pre_tasks:
+    #==========================================================================
+    # LOAD AND VALIDATE CONFIGURATION
+    #==========================================================================
+    - name: Load container map file
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../{{ lxc_map_file }}"
+
+    - name: Assert running on Proxmox (Debian)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts as root."
+
+    - name: Show provisioning plan for this host
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║        CONTAINER PROVISIONING PLAN                               ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ Host: {{ inventory_hostname }}
+          ║ Containers to provision:
+          {% for c in lxc_containers | selectattr('host', 'equalto', inventory_hostname) | list %}
+          ║   - {{ c.id }}: {{ c.hostname }} ({{ c.provision_type | default('privileged') }})
+          {% endfor %}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+    #==========================================================================
+    # HARDWARE DETECTION - NVIDIA GPUs (only for nvidia_gpu provision type)
+    #==========================================================================
+    - name: Detect NVIDIA GPU devices on Proxmox host
+      ansible.builtin.shell: |
+        set -e
+
+        # Check for nvidia-smi to confirm driver is loaded
+        if ! command -v nvidia-smi &>/dev/null; then
+          echo "[]"
+          exit 0
+        fi
+
+        # Get actual device info
+        devices_json="["
+
+        # GPU devices (nvidia0-7)
+        for i in {0..7}; do
+          if [ -e /dev/nvidia$i ]; then
+            major=$(stat -c '%t' /dev/nvidia$i)
+            minor=$(stat -c '%T' /dev/nvidia$i)
+            devices_json="${devices_json}{\"name\":\"nvidia$i\",\"path\":\"/dev/nvidia$i\",\"major\":\"$((0x$major))\",\"minor\":\"$((0x$minor))\"},"
+          fi
+        done
+
+        # Control device
+        if [ -e /dev/nvidiactl ]; then
+          major=$(stat -c '%t' /dev/nvidiactl)
+          minor=$(stat -c '%T' /dev/nvidiactl)
+          devices_json="${devices_json}{\"name\":\"nvidiactl\",\"path\":\"/dev/nvidiactl\",\"major\":\"$((0x$major))\",\"minor\":\"$((0x$minor))\"},"
+        fi
+
+        # Modeset device
+        if [ -e /dev/nvidia-modeset ]; then
+          major=$(stat -c '%t' /dev/nvidia-modeset)
+          minor=$(stat -c '%T' /dev/nvidia-modeset)
+          devices_json="${devices_json}{\"name\":\"nvidia-modeset\",\"path\":\"/dev/nvidia-modeset\",\"major\":\"$((0x$major))\",\"minor\":\"$((0x$minor))\"},"
+        fi
+
+        # UVM devices
+        if [ -e /dev/nvidia-uvm ]; then
+          major=$(stat -c '%t' /dev/nvidia-uvm)
+          minor=$(stat -c '%T' /dev/nvidia-uvm)
+          devices_json="${devices_json}{\"name\":\"nvidia-uvm\",\"path\":\"/dev/nvidia-uvm\",\"major\":\"$((0x$major))\",\"minor\":\"$((0x$minor))\"},"
+        fi
+
+        if [ -e /dev/nvidia-uvm-tools ]; then
+          major=$(stat -c '%t' /dev/nvidia-uvm-tools)
+          minor=$(stat -c '%T' /dev/nvidia-uvm-tools)
+          devices_json="${devices_json}{\"name\":\"nvidia-uvm-tools\",\"path\":\"/dev/nvidia-uvm-tools\",\"major\":\"$((0x$major))\",\"minor\":\"$((0x$minor))\"},"
+        fi
+
+        # Remove trailing comma and close array
+        devices_json=$(echo "$devices_json" | sed 's/,$//')
+        devices_json="${devices_json}]"
+
+        echo "$devices_json"
+      args:
+        executable: /bin/bash
+      register: nvidia_devices_detection
+      changed_when: false
+      failed_when: false
+
+    - name: Detect NVIDIA driver version on Proxmox host (for GPU containers)
+      ansible.builtin.shell: |
+        set -e
+        if ! command -v nvidia-smi &>/dev/null; then
+          echo ""
+          exit 0
+        fi
+        # Prefer NVML/driver version from nvidia-smi output, e.g. "Driver Version: 570.86.16"
+        nvidia-smi 2>/dev/null | grep -oP 'Driver Version:\s*\K[0-9]+(\.[0-9]+)+(\.[0-9]+)?' | head -1 || true
+      args:
+        executable: /bin/bash
+      register: nvidia_driver_version_detect
+      changed_when: false
+      failed_when: false
+
+    - name: Store NVIDIA devices and driver version as facts
+      ansible.builtin.set_fact:
+        nvidia_devices: "{{ nvidia_devices_detection.stdout | from_json }}"
+        has_nvidia_gpu: "{{ (nvidia_devices_detection.stdout | from_json | length) > 0 }}"
+        # Host driver version is the only safe version to install inside LXC to avoid NVML mismatches
+        nvidia_driver_version_host: "{{ (nvidia_driver_version_detect.stdout | trim) if (nvidia_driver_version_detect.stdout is defined) else '' }}"
+
+    - name: Display NVIDIA detection results
+      ansible.builtin.debug:
+        msg: |
+          NVIDIA GPU Detection: {{ has_nvidia_gpu }}
+          Detected {{ nvidia_devices | length }} NVIDIA devices
+          Host NVIDIA driver version: {{ nvidia_driver_version_host | default('') }}
+
+  tasks:
+    #==========================================================================
+    # PROXMOX HOST PREPARATION
+    #==========================================================================
+    - name: Validate required storage backends exist
+      ansible.builtin.shell: |
+        echo "Validating Proxmox storage backends..."
+        storages=""
+        {% for container in lxc_containers %}
+        {% if container.host == inventory_hostname %}
+        {% if ':' in container.rootfs %}
+        storages="$storages {{ container.rootfs.split(':')[0] }}"
+        {% endif %}
+        {% endif %}
+        {% endfor %}
+
+        unique_storages=$(echo $storages | tr ' ' '\n' | sort -u)
+
+        for storage in $unique_storages; do
+          if [ -n "$storage" ] && pvesm status | grep -q "^$storage "; then
+            echo "✓ Storage backend '$storage' exists"
+          elif [ -n "$storage" ]; then
+            echo "✗ ERROR: Storage backend '$storage' NOT FOUND!"
+            pvesm status
+            exit 1
+          fi
+        done
+        echo "All required storage backends validated"
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Ensure required kernel modules are loaded
+      ansible.builtin.shell: |
+        set -e
+        modprobe overlay || true
+        modprobe ip_tables || true
+        modprobe ip6_tables || true
+        modprobe nf_nat || true
+        modprobe xt_conntrack || true
+        modprobe br_netfilter || true
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Persist kernel modules across reboots
+      ansible.builtin.lineinfile:
+        path: /etc/modules
+        line: "{{ item }}"
+        create: true
+      loop:
+        - overlay
+        - ip_tables
+        - ip6_tables
+        - nf_nat
+        - xt_conntrack
+        - br_netfilter
+
+    - name: Configure sysctl for container networking
+      ansible.builtin.blockinfile:
+        path: /etc/sysctl.conf
+        marker: "# {mark} LXC_CONTAINER_NETWORKING"
+        block: |
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward = 1
+        create: true
+
+    - name: Apply sysctl configuration
+      ansible.builtin.shell: sysctl -p
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    #==========================================================================
+    # SSH KEY GENERATION & ANSIBLE SCAFFOLDING (on localhost)
+    #==========================================================================
+    - name: Generate unified SSH keypair and Ansible scaffolding for deployment
+      delegate_to: localhost
+      become: false
+      run_once: true
+      block:
+        - name: Create Ansible scaffolding directory structure
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            mode: "0755"
+          loop:
+            - "{{ output_base_dir }}/{{ deployment_name }}"
+            - "{{ output_base_dir }}/{{ deployment_name }}/inventory"
+            - "{{ output_base_dir }}/{{ deployment_name }}/inventory/group_vars"
+            - "{{ output_base_dir }}/{{ deployment_name }}/playbooks"
+
+        - name: Generate single SSH key pair for all containers
+          ansible.builtin.shell: |
+            key_path="{{ output_base_dir }}/{{ deployment_name }}/{{ deployment_name }}.pem"
+            pub_path="{{ output_base_dir }}/{{ deployment_name }}/{{ deployment_name }}.pem.pub"
+            if [ ! -f "$key_path" ]; then
+              ssh-keygen -t ed25519 -f "$key_path" -N "" -C "ansible@{{ deployment_name }}"
+              chmod 600 "$key_path"
+              echo "CREATED"
+            else
+              echo "EXISTS"
+            fi
+            # Ensure a .pub exists even if older key formats were used
+            if [ ! -f "$pub_path" ] && [ -f "$key_path" ]; then
+              ssh-keygen -y -f "$key_path" > "$pub_path"
+            fi
+          args:
+            executable: /bin/bash
+          register: ssh_key_generated
+          changed_when: "'CREATED' in ssh_key_generated.stdout"
+
+        - name: Read unified public key
+          ansible.builtin.slurp:
+            src: "{{ output_base_dir }}/{{ deployment_name }}/{{ deployment_name }}.pem.pub"
+          register: unified_ssh_pubkey
+
+    - name: Store unified public key as fact
+      ansible.builtin.set_fact:
+        ssh_public_key: "{{ unified_ssh_pubkey.content | b64decode | trim }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    #==========================================================================
+    # MOUNT FLAGS PREPARATION
+    #==========================================================================
+    - name: Build mount flags string for pct create
+      when: item.host == inventory_hostname
+      ansible.builtin.set_fact:
+        pct_mount_flags: >-
+          {%- set flags = [] -%}
+          {%- if item.mounts is defined -%}
+          {%- for m in item.mounts -%}
+            {%- set idx = loop.index0 -%}
+            {%- if m.type == 'directory' -%}
+              {%- set src = m.host_path -%}
+              {%- set base = '--mp' ~ idx|string ~ ' ' ~ src ~ ',mp=' ~ m.container_path -%}
+              {%- if m.options is defined and m.options|length > 0 -%}
+                {%- set _ = flags.append(base ~ (m.options if m.options.startswith(',') else (',' ~ m.options))) -%}
+              {%- elif m.read_only | default(false) -%}
+                {%- set _ = flags.append(base ~ ',ro=1') -%}
+              {%- else -%}
+                {%- set _ = flags.append(base) -%}
+              {%- endif -%}
+            {%- elif m.type == 'storage' -%}
+              {%- set storage = m.storage -%}
+              {%- set rawsz = (m.size | string) -%}
+              {%- set lower = rawsz | lower -%}
+              {%- if lower.endswith('t') -%}
+                {%- set size_gib = (((lower[0:-1] | float) * 1024) | round(0, 'floor')) | int -%}
+              {%- elif lower.endswith('g') -%}
+                {%- set size_gib = ((lower[0:-1] | float) | round(0, 'floor')) | int -%}
+              {%- elif lower.endswith('m') -%}
+                {%- set size_gib = ((((lower[0:-1] | float) / 1024) | round(0, 'ceil')) | int) | max(1) -%}
+              {%- else -%}
+                {%- set size_gib = (lower | float) | round(0, 'floor') | int -%}
+              {%- endif -%}
+              {%- set base = '--mp' ~ idx ~ ' ' ~ storage ~ ':' ~ (size_gib | string) ~ ',mp=' ~ m.container_path -%}
+              {%- if m.options is defined and m.options|length > 0 -%}
+                {%- set _ = flags.append(base ~ (m.options if m.options.startswith(',') else (',' ~ m.options))) -%}
+              {%- else -%}
+                {%- set _ = flags.append(base) -%}
+              {%- endif -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {{ flags | join(' ') }}
+      loop: "{{ lxc_containers }}"
+      register: pct_mount_flags_results
+
+    - name: Map mount flags to container IDs
+      when: item.item.host == inventory_hostname
+      ansible.builtin.set_fact:
+        pct_mount_flags_map: "{{ (pct_mount_flags_map | default({})) | combine({ item.item.id: (item.ansible_facts.pct_mount_flags | trim) }) }}"
+      loop: "{{ pct_mount_flags_results.results }}"
+
+    #==========================================================================
+    # CONTAINER CREATION
+    #==========================================================================
+    - name: Create LXC containers if missing
+      when: item.host == inventory_hostname
+      vars:
+        provision_type: "{{ item.provision_type | default('privileged') }}"
+        is_unprivileged: "{{ provision_type == 'unprivileged' }}"
+      ansible.builtin.shell: >-
+        pct create {{ item.id }} {{ item.template | default(lxc_defaults.template) }}
+        --hostname {{ item.hostname }}
+        --memory {{ item.memory | default(lxc_defaults.memory | default(2048)) }}
+        --cores {{ item.cores | default(lxc_defaults.cores | default(2)) }}
+        --net0 name=eth0,bridge={{ item.bridge | default(lxc_defaults.bridge | default('vmbr0')) }},firewall=1,gw={{ item.gateway | default(lxc_defaults.gateway | default('10.0.0.1')) }},ip={{ item.ip }}{% if (item.vlan_tag | default(lxc_defaults.vlan_tag | default(0))) | int != 0 %},tag={{ item.vlan_tag | default(lxc_defaults.vlan_tag) }}{% endif %},type=veth
+        --ostype ubuntu --swap 0 --rootfs {{ item.rootfs }}
+        {% if item.nameserver is defined or lxc_defaults.dns is defined %}--nameserver {{ item.nameserver | default(lxc_defaults.dns) }}{% endif %}
+        {{ pct_mount_flags_map[item.id] | default('') }}
+        --unprivileged {{ '1' if is_unprivileged else '0' }}
+      args:
+        executable: /bin/bash
+        creates: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+      loop: "{{ lxc_containers }}"
+
+    #==========================================================================
+    # LXC SECURITY PROFILE APPLICATION
+    #==========================================================================
+    - name: Apply LXC security profile (unprivileged)
+      when: item.host == inventory_hostname and (item.provision_type | default('privileged')) == 'unprivileged'
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+        marker: "# {mark} LXC_SECURITY_PROFILE"
+        block: |
+          # === UNPRIVILEGED CONTAINER SETTINGS ===
+          lxc.prlimit.memlock: unlimited
+          lxc.prlimit.nofile: 1048576
+          lxc.prlimit.nproc: unlimited
+      loop: "{{ lxc_containers }}"
+
+    - name: Apply LXC security profile (privileged - no GPU)
+      when: item.host == inventory_hostname and (item.provision_type | default('privileged')) == 'privileged'
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+        marker: "# {mark} LXC_SECURITY_PROFILE"
+        block: |
+          # === PRIVILEGED CONTAINER SETTINGS ===
+          lxc.apparmor.profile = unconfined
+          lxc.cgroup2.devices.allow: a
+          lxc.cgroup2.devices.allow: b
+          lxc.cgroup2.devices.allow: c
+          lxc.mount.auto: proc:rw sys:rw cgroup:rw
+
+          # === ESSENTIAL DEVICE ACCESS ===
+          lxc.mount.entry: /dev/full dev/full none bind,optional,create=file
+          lxc.mount.entry: /dev/null dev/null none bind,optional,create=file
+          lxc.mount.entry: /dev/random dev/random none bind,optional,create=file
+          lxc.mount.entry: /dev/tty dev/tty none bind,optional,create=file
+          lxc.mount.entry: /dev/urandom dev/urandom none bind,optional,create=file
+          lxc.mount.entry: /dev/zero dev/zero none bind,optional,create=file
+
+          # === SYSTEM REQUIREMENTS ===
+          lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
+          lxc.mount.entry: /sys/kernel/security sys/kernel/security none bind,optional
+          lxc.mount.entry: /sys/fs/fuse/connections sys/fs/fuse/connections none bind,optional
+
+          # === CONTAINER RUNTIME SUPPORT ===
+          lxc.mount.entry: /dev/fuse dev/fuse none bind,optional,create=file
+          lxc.mount.entry: /proc/sys/kernel/keys proc/sys/kernel/keys none bind,optional
+
+          # === SECURITY AND LIMITS ===
+          lxc.prlimit.memlock: unlimited
+          lxc.prlimit.nofile: 1048576
+          lxc.prlimit.nproc: unlimited
+      loop: "{{ lxc_containers }}"
+
+    - name: Apply LXC security profile (nvidia_gpu)
+      when: item.host == inventory_hostname and (item.provision_type | default('privileged')) == 'nvidia_gpu'
+      ansible.builtin.blockinfile:
+        path: "/etc/pve/nodes/{{ ansible_hostname }}/lxc/{{ item.id }}.conf"
+        marker: "# {mark} LXC_SECURITY_PROFILE"
+        block: |
+          # === NVIDIA GPU CONTAINER SETTINGS ===
+          lxc.apparmor.profile = unconfined
+          lxc.cgroup2.devices.allow: a
+          lxc.cgroup2.devices.allow: b
+          lxc.cgroup2.devices.allow: c
+          lxc.mount.auto: proc:rw sys:rw cgroup:rw
+
+          # === ESSENTIAL DEVICE ACCESS ===
+          lxc.mount.entry: /dev/full dev/full none bind,optional,create=file
+          lxc.mount.entry: /dev/null dev/null none bind,optional,create=file
+          lxc.mount.entry: /dev/random dev/random none bind,optional,create=file
+          lxc.mount.entry: /dev/tty dev/tty none bind,optional,create=file
+          lxc.mount.entry: /dev/urandom dev/urandom none bind,optional,create=file
+          lxc.mount.entry: /dev/zero dev/zero none bind,optional,create=file
+
+          # === SYSTEM REQUIREMENTS ===
+          lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
+          lxc.mount.entry: /sys/kernel/security sys/kernel/security none bind,optional
+          lxc.mount.entry: /sys/fs/fuse/connections sys/fs/fuse/connections none bind,optional
+
+          # === CONTAINER RUNTIME SUPPORT ===
+          lxc.mount.entry: /dev/fuse dev/fuse none bind,optional,create=file
+          lxc.mount.entry: /proc/sys/kernel/keys proc/sys/kernel/keys none bind,optional
+
+          {% if has_nvidia_gpu | bool %}
+          # === GPU PASSTHROUGH ({{ nvidia_devices | length }} NVIDIA DEVICES) ===
+          {% for device in nvidia_devices | default([]) %}
+          lxc.cgroup2.devices.allow: c {{ device.major }}:{{ device.minor }} rwm
+          lxc.mount.entry: {{ device.path }} dev/{{ device.name }} none bind,optional,create=file
+          {% endfor %}
+          # nvidia-caps directory
+          lxc.cgroup2.devices.allow: c 510:* rwm
+          lxc.mount.entry: /dev/nvidia-caps dev/nvidia-caps none bind,optional,create=dir
+          {% endif %}
+
+          # === SECURITY AND LIMITS ===
+          lxc.prlimit.memlock: unlimited
+          lxc.prlimit.nofile: 1048576
+          lxc.prlimit.nproc: unlimited
+      loop: "{{ lxc_containers }}"
+
+    #==========================================================================
+    # START CONTAINERS
+    #==========================================================================
+    - name: Start LXC containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        if pct status {{ item.id }} 2>/dev/null | grep -q "running"; then
+          echo "Container {{ item.id }} already running"
+          exit 0
+        fi
+        pct start {{ item.id }}
+      args:
+        executable: /bin/bash
+      register: start_result
+      changed_when: "'already running' not in start_result.stdout"
+      failed_when: start_result.rc != 0
+      loop: "{{ lxc_containers }}"
+
+    - name: Wait for containers to be fully started
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        for i in {1..30}; do
+          if pct exec {{ item.id }} -- test -f /proc/version; then
+            echo "Container {{ item.id }} is ready"
+            exit 0
+          fi
+          sleep 3
+        done
+        exit 1
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    #==========================================================================
+    # CREATE NVIDIA DEVICE NODES (nvidia_gpu only)
+    #==========================================================================
+    - name: Create NVIDIA device nodes inside GPU containers
+      when: item.host == inventory_hostname and (item.provision_type | default('privileged')) == 'nvidia_gpu' and has_nvidia_gpu | bool
+      ansible.builtin.shell: |
+        set -e
+        {% for device in nvidia_devices | default([]) %}
+        pct exec {{ item.id }} -- bash -c '[ ! -e {{ device.path }} ] && mknod -m 666 {{ device.path }} c {{ device.major }} {{ device.minor }} || true'
+        {% endfor %}
+        pct exec {{ item.id }} -- bash -c 'mkdir -p /dev/nvidia-caps && chmod 755 /dev/nvidia-caps'
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+      failed_when: false
+
+    - name: Create systemd service for persistent NVIDIA device nodes
+      when: item.host == inventory_hostname and (item.provision_type | default('privileged')) == 'nvidia_gpu' and has_nvidia_gpu | bool
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- bash -c 'cat > /etc/systemd/system/nvidia-device-nodes.service << "EOF"
+        [Unit]
+        Description=Create NVIDIA device nodes for LXC GPU passthrough
+        After=local-fs.target
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=yes
+        ExecStart=/bin/bash -c "\
+        {% for device in nvidia_devices | default([]) %}
+          [ ! -e {{ device.path }} ] && mknod -m 666 {{ device.path }} c {{ device.major }} {{ device.minor }} || true; \
+        {% endfor %}
+          mkdir -p /dev/nvidia-caps && chmod 755 /dev/nvidia-caps || true"
+
+        [Install]
+        WantedBy=multi-user.target
+        EOF'
+
+        pct exec {{ item.id }} -- systemctl daemon-reload
+        pct exec {{ item.id }} -- systemctl enable nvidia-device-nodes.service
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+      failed_when: false
+
+    #==========================================================================
+    # SYSTEM CONFIGURATION
+    #==========================================================================
+    - name: Disable swap in containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- swapoff -a || true
+        pct exec {{ item.id }} -- bash -c 'sed -i "/swap/d" /etc/fstab' || true
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    - name: Update apt cache
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt update
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    - name: Install base packages
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt install -y \
+          curl wget vim htop git jq unzip \
+          ca-certificates gnupg lsb-release \
+          sudo rsync openssh-server ufw \
+          software-properties-common
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    - name: Configure UTF-8 locale and timezone
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- locale-gen en_US.UTF-8
+        pct exec {{ item.id }} -- update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+        pct exec {{ item.id }} -- timedatectl set-timezone UTC
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    #==========================================================================
+    # DISABLE TELEMETRY
+    #==========================================================================
+    - name: Disable Ubuntu telemetry and bloatware
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        # Disable Ubuntu Pro/Advantage
+        pct exec {{ item.id }} -- systemctl disable ubuntu-advantage || true
+        pct exec {{ item.id }} -- systemctl stop ubuntu-advantage || true
+        pct exec {{ item.id }} -- apt remove -y ubuntu-advantage-tools || true
+
+        # Disable crash reporting (apport)
+        pct exec {{ item.id }} -- systemctl disable apport || true
+        pct exec {{ item.id }} -- systemctl stop apport || true
+        pct exec {{ item.id }} -- apt remove -y apport || true
+
+        # Disable popularity contest
+        pct exec {{ item.id }} -- apt remove -y popularity-contest || true
+
+        # Disable whoopsie (error reporting)
+        pct exec {{ item.id }} -- systemctl disable whoopsie || true
+        pct exec {{ item.id }} -- systemctl stop whoopsie || true
+        pct exec {{ item.id }} -- apt remove -y whoopsie || true
+
+        # Disable motd ads
+        pct exec {{ item.id }} -- chmod -x /etc/update-motd.d/10-help-text || true
+        pct exec {{ item.id }} -- chmod -x /etc/update-motd.d/50-motd-news || true
+        pct exec {{ item.id }} -- chmod -x /etc/update-motd.d/80-esm || true
+        pct exec {{ item.id }} -- chmod -x /etc/update-motd.d/91-release-upgrade || true
+        pct exec {{ item.id }} -- chmod -x /etc/update-motd.d/95-hwe-eol || true
+
+        # Disable Ubuntu Pro MOTD spam
+        pct exec {{ item.id }} -- bash -c 'echo "ENABLED=0" > /etc/default/motd-news' || true
+
+        echo "Telemetry disabled for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+      failed_when: false
+
+    #==========================================================================
+    # CONFIGURE AUTOMATIC SECURITY UPDATES
+    #==========================================================================
+    - name: Configure automatic security updates
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt install -y unattended-upgrades apt-listchanges
+
+        pct exec {{ item.id }} -- bash -c 'cat > /etc/apt/apt.conf.d/20auto-upgrades << EOF
+        APT::Periodic::Update-Package-Lists "1";
+        APT::Periodic::Download-Upgradeable-Packages "1";
+        APT::Periodic::AutocleanInterval "7";
+        APT::Periodic::Unattended-Upgrade "1";
+        EOF'
+
+        pct exec {{ item.id }} -- bash -c 'cat > /etc/apt/apt.conf.d/50unattended-upgrades << EOF
+        Unattended-Upgrade::Allowed-Origins {
+            "\${distro_id}:\${distro_codename}-security";
+            "\${distro_id} ESMApps:\${distro_codename}-apps-security";
+            "\${distro_id} ESM:\${distro_codename}-infra-security";
+        };
+        Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+        Unattended-Upgrade::MinimalSteps "true";
+        Unattended-Upgrade::Remove-Unused-Dependencies "true";
+        Unattended-Upgrade::Automatic-Reboot "false";
+        EOF'
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    #==========================================================================
+    # FULL SYSTEM UPDATE AND UPGRADE
+    #==========================================================================
+    - name: Perform full system update and upgrade
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt update
+        pct exec {{ item.id }} -- apt upgrade -y
+        pct exec {{ item.id }} -- apt dist-upgrade -y
+        pct exec {{ item.id }} -- apt autoremove -y
+        pct exec {{ item.id }} -- apt autoclean
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    #==========================================================================
+    # UFW FIREWALL CONFIGURATION
+    #==========================================================================
+    - name: Configure UFW firewall (hardened - SSH and ICMP only)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        # Reset UFW to default
+        pct exec {{ item.id }} -- ufw --force reset
+
+        # Set default policies
+        pct exec {{ item.id }} -- ufw default deny incoming
+        pct exec {{ item.id }} -- ufw default allow outgoing
+
+        # Allow SSH
+        pct exec {{ item.id }} -- ufw allow 22/tcp comment 'SSH'
+
+        # Allow ICMP (ping) - requires editing before.rules
+        pct exec {{ item.id }} -- bash -c 'cat > /etc/ufw/before.rules.d/allow-icmp.rules << EOF
+        # Allow ICMP
+        -A ufw-before-input -p icmp --icmp-type echo-request -j ACCEPT
+        -A ufw-before-output -p icmp --icmp-type echo-reply -j ACCEPT
+        EOF' || true
+
+        # Enable UFW
+        pct exec {{ item.id }} -- ufw --force enable
+
+        # Show status
+        pct exec {{ item.id }} -- ufw status verbose
+
+        echo "UFW firewall configured for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    #==========================================================================
+    # SSH USER AND KEY SETUP
+    #==========================================================================
+    - name: Create ansible user and setup SSH key authentication
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        set -e
+        # Create ansible user (locked by default)
+        pct exec {{ item.id }} -- bash -c 'id -u ansible >/dev/null 2>&1 || adduser --disabled-password --gecos "Ansible User" ansible'
+
+        # Unlock account for SSH key authentication WITHOUT setting a usable password
+        # (passwd -d removes the password hash and unlocks the account; PasswordAuthentication is disabled anyway)
+        pct exec {{ item.id }} -- passwd -d ansible
+
+        # Add to sudo group with NOPASSWD
+        pct exec {{ item.id }} -- usermod -aG sudo ansible
+        pct exec {{ item.id }} -- bash -c 'echo "ansible ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ansible'
+        pct exec {{ item.id }} -- chmod 440 /etc/sudoers.d/ansible
+
+        # Setup SSH directory
+        pct exec {{ item.id }} -- mkdir -p /home/ansible/.ssh
+        pct exec {{ item.id }} -- chmod 700 /home/ansible/.ssh
+
+        # Add public key (unified key for all containers)
+        pct exec {{ item.id }} -- bash -c 'echo "{{ ssh_public_key }}" > /home/ansible/.ssh/authorized_keys'
+        pct exec {{ item.id }} -- chmod 600 /home/ansible/.ssh/authorized_keys
+        pct exec {{ item.id }} -- chown -R ansible:ansible /home/ansible/.ssh
+
+        # Disable password authentication for SSH
+        pct exec {{ item.id }} -- bash -c 'sed -i "s/^#*PasswordAuthentication.*/PasswordAuthentication no/" /etc/ssh/sshd_config'
+        pct exec {{ item.id }} -- bash -c 'sed -i "s/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication no/" /etc/ssh/sshd_config'
+        pct exec {{ item.id }} -- bash -c 'sed -i "s/^#*UsePAM.*/UsePAM no/" /etc/ssh/sshd_config'
+
+        # Enable public key authentication
+        pct exec {{ item.id }} -- bash -c 'sed -i "s/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/" /etc/ssh/sshd_config'
+
+        # Restart SSH
+        pct exec {{ item.id }} -- systemctl restart sshd
+
+        echo "SSH key authentication configured for container {{ item.id }}"
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    #==========================================================================
+    # NVIDIA DRIVER INSTALLATION (nvidia_gpu provision type ONLY)
+    #==========================================================================
+    - name: Download NVIDIA driver (nvidia_gpu containers only)
+      when: item.host == inventory_hostname and (item.provision_type | default('privileged')) == 'nvidia_gpu' and has_nvidia_gpu | bool
+      vars:
+        # Auto-select the host driver version to avoid NVML mismatch inside LXC
+        driver_version: >-
+          {{
+            (nvidia_driver_version_host | default('') | trim)
+            if (nvidia_driver_version_host | default('') | trim | length) > 0
+            else (nvidia.driver_version | default('') | trim)
+          }}
+        driver_url: "https://us.download.nvidia.com/XFree86/Linux-x86_64/{{ driver_version }}/NVIDIA-Linux-x86_64-{{ driver_version }}.run"
+      ansible.builtin.shell: |
+        set -e
+        if [ -z "{{ driver_version }}" ]; then
+          echo "No NVIDIA driver version detected on host and none specified in map; skipping driver download."
+          exit 0
+        fi
+        pct exec {{ item.id }} -- wget -O /root/NVIDIA-Linux-x86_64-{{ driver_version }}.run "{{ driver_url }}"
+        pct exec {{ item.id }} -- chmod +x /root/NVIDIA-Linux-x86_64-{{ driver_version }}.run
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    - name: Install NVIDIA driver dependencies (nvidia_gpu containers only)
+      when: item.host == inventory_hostname and (item.provision_type | default('privileged')) == 'nvidia_gpu' and has_nvidia_gpu | bool
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- apt update
+        pct exec {{ item.id }} -- apt install -y build-essential linux-headers-generic
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+    - name: Install NVIDIA driver (nvidia_gpu containers only)
+      when: item.host == inventory_hostname and (item.provision_type | default('privileged')) == 'nvidia_gpu' and has_nvidia_gpu | bool
+      vars:
+        driver_version: >-
+          {{
+            (nvidia_driver_version_host | default('') | trim)
+            if (nvidia_driver_version_host | default('') | trim | length) > 0
+            else (nvidia.driver_version | default('') | trim)
+          }}
+      ansible.builtin.shell: |
+        set -e
+        if [ -z "{{ driver_version }}" ]; then
+          echo "No NVIDIA driver version detected on host and none specified in map; skipping driver install."
+          exit 0
+        fi
+
+        # Remove existing NVIDIA packages
+        pct exec {{ item.id }} -- apt-get remove --purge '^nvidia-.*' libnvidia-* || true
+        pct exec {{ item.id }} -- apt-get autoremove --purge -y || true
+
+        # Install NVIDIA driver (no kernel module for LXC)
+        pct exec {{ item.id }} -- bash -c "cd /root && ./NVIDIA-Linux-x86_64-{{ driver_version }}.run --no-questions --ui=none --no-kernel-module --no-drm --install-libglvnd"
+        pct exec {{ item.id }} -- ldconfig
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+      failed_when: false
+
+    - name: Test NVIDIA driver installation
+      when: item.host == inventory_hostname and (item.provision_type | default('privileged')) == 'nvidia_gpu' and has_nvidia_gpu | bool
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- nvidia-smi
+      args:
+        executable: /bin/bash
+      register: nvidia_test
+      failed_when: false
+      loop: "{{ lxc_containers }}"
+
+    - name: Display NVIDIA test results
+      when: item.item.host == inventory_hostname and (item.item.provision_type | default('privileged')) == 'nvidia_gpu'
+      ansible.builtin.debug:
+        msg: "Container {{ item.item.id }} NVIDIA: {{ 'PASSED' if item.rc == 0 else 'FAILED' }}"
+      loop: "{{ nvidia_test.results | default([]) }}"
+
+    #==========================================================================
+    # GENERATE FULL ANSIBLE SCAFFOLDING FOR PROVISIONED CONTAINERS
+    #==========================================================================
+    - name: Generate Ansible inventory (hosts.ini)
+      delegate_to: localhost
+      become: false
+      run_once: true
+      ansible.builtin.copy:
+        content: |
+          #==============================================================================
+          # ANSIBLE INVENTORY - {{ deployment_name }}
+          #==============================================================================
+          # Generated by Proxmox Ubuntu LXC Provisioner
+          # Source: {{ lxc_map_file }}
+          # Containers: {{ lxc_containers | length }}
+          #
+          # USAGE:
+          #   ansible -i inventory/hosts.ini all -m ping
+          #   ansible-playbook -i inventory/hosts.ini playbooks/your_playbook.yml
+          #==============================================================================
+
+          #------------------------------------------------------------------------------
+          # ALL CONTAINERS
+          #------------------------------------------------------------------------------
+          [lxc_containers]
+          {% for c in lxc_containers %}
+          {{ c.hostname }} ansible_host={{ c.ip.split('/')[0] }} lxc_id={{ c.id }} provision_type={{ c.provision_type | default('privileged') }}
+          {% endfor %}
+
+          #------------------------------------------------------------------------------
+          # BY PROVISION TYPE
+          #------------------------------------------------------------------------------
+          [unprivileged]
+          {% for c in lxc_containers | selectattr('provision_type', 'defined') | selectattr('provision_type', 'equalto', 'unprivileged') | list %}
+          {{ c.hostname }}
+          {% endfor %}
+
+          [privileged]
+          {% for c in lxc_containers | rejectattr('provision_type', 'defined') | list %}
+          {{ c.hostname }}
+          {% endfor %}
+          {% for c in lxc_containers | selectattr('provision_type', 'defined') | selectattr('provision_type', 'equalto', 'privileged') | list %}
+          {{ c.hostname }}
+          {% endfor %}
+
+          [nvidia_gpu]
+          {% for c in lxc_containers | selectattr('provision_type', 'defined') | selectattr('provision_type', 'equalto', 'nvidia_gpu') | list %}
+          {{ c.hostname }}
+          {% endfor %}
+
+          #------------------------------------------------------------------------------
+          # BY PROXMOX HOST
+          #------------------------------------------------------------------------------
+          {% for host in lxc_containers | map(attribute='host') | unique | list %}
+          [host_{{ host | replace('.', '_') }}]
+          {% for c in lxc_containers | selectattr('host', 'equalto', host) | list %}
+          {{ c.hostname }}
+          {% endfor %}
+
+          {% endfor %}
+        dest: "{{ output_base_dir }}/{{ deployment_name }}/inventory/hosts.ini"
+        mode: "0644"
+
+    - name: Generate group_vars/all.yml
+      delegate_to: localhost
+      become: false
+      run_once: true
+      ansible.builtin.copy:
+        content: |
+          ---
+          #==============================================================================
+          # GROUP VARIABLES - {{ deployment_name }}
+          #==============================================================================
+          # Generated by Proxmox Ubuntu LXC Provisioner
+          #==============================================================================
+
+          #------------------------------------------------------------------------------
+          # SSH CONNECTION SETTINGS
+          #------------------------------------------------------------------------------
+          ansible_user: ansible
+          ansible_ssh_private_key_file: "{{ '{{' }} playbook_dir {{ '}}' }}/../{{ deployment_name }}.pem"
+          ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+          ansible_python_interpreter: "/usr/bin/python3"
+
+          #------------------------------------------------------------------------------
+          # DEPLOYMENT METADATA
+          #------------------------------------------------------------------------------
+          deployment_name: "{{ deployment_name }}"
+          deployment_containers: {{ lxc_containers | length }}
+
+          #------------------------------------------------------------------------------
+          # CONTAINER INFO (for reference)
+          #------------------------------------------------------------------------------
+          # {% for c in lxc_containers %}
+          # {{ c.hostname }}: {{ c.ip.split('/')[0] }} (ID: {{ c.id }}, Type: {{ c.provision_type | default('privileged') }})
+          # {% endfor %}
+        dest: "{{ output_base_dir }}/{{ deployment_name }}/inventory/group_vars/all.yml"
+        mode: "0644"
+
+    - name: Generate ansible.cfg
+      delegate_to: localhost
+      become: false
+      run_once: true
+      ansible.builtin.copy:
+        content: |
+          [defaults]
+          inventory = inventory/hosts.ini
+          private_key_file = {{ deployment_name }}.pem
+          remote_user = ansible
+          host_key_checking = False
+          retry_files_enabled = False
+          gathering = smart
+          fact_caching = memory
+
+          [privilege_escalation]
+          become = True
+          become_method = sudo
+          become_user = root
+          become_ask_pass = False
+
+          [ssh_connection]
+          ssh_args = -o ControlMaster=auto -o ControlPersist=60s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+          pipelining = True
+        dest: "{{ output_base_dir }}/{{ deployment_name }}/ansible.cfg"
+        mode: "0644"
+
+    - name: Generate example playbook
+      delegate_to: localhost
+      become: false
+      run_once: true
+      ansible.builtin.copy:
+        content: |
+          ---
+          #==============================================================================
+          # EXAMPLE PLAYBOOK - {{ deployment_name }}
+          #==============================================================================
+          # This is a starter playbook for your provisioned containers.
+          #
+          # USAGE:
+          #   ansible-playbook playbooks/site.yml
+          #==============================================================================
+
+          - name: Configure {{ deployment_name }} containers
+            hosts: lxc_containers
+            become: true
+            gather_facts: true
+
+            tasks:
+              - name: Verify connectivity
+                ansible.builtin.ping:
+
+              - name: Display container info
+                ansible.builtin.debug:
+                  msg: |
+                    Hostname: {{ '{{' }} inventory_hostname {{ '}}' }}
+                    IP: {{ '{{' }} ansible_host {{ '}}' }}
+                    OS: {{ '{{' }} ansible_distribution {{ '}}' }} {{ '{{' }} ansible_distribution_version {{ '}}' }}
+                    Kernel: {{ '{{' }} ansible_kernel {{ '}}' }}
+
+              # Add your tasks below this line
+              # - name: Install packages
+              #   ansible.builtin.apt:
+              #     name:
+              #       - nginx
+              #       - python3-pip
+              #     state: present
+              #     update_cache: true
+        dest: "{{ output_base_dir }}/{{ deployment_name }}/playbooks/site.yml"
+        mode: "0644"
+
+    - name: Generate README.md
+      delegate_to: localhost
+      become: false
+      run_once: true
+      ansible.builtin.copy:
+        content: |
+          # {{ deployment_name }}
+
+          Ansible project for managing LXC containers provisioned by [Proxmox Ubuntu LXC Provisioner](https://github.com/YOUR_USERNAME/proxmox-ubuntu-lxc-provisioner).
+
+          ## Containers
+
+          | Hostname | IP Address | Type | LXC ID |
+          |----------|------------|------|--------|
+          {% for c in lxc_containers %}
+          | {{ c.hostname }} | {{ c.ip.split('/')[0] }} | {{ c.provision_type | default('privileged') }} | {{ c.id }} |
+          {% endfor %}
+
+          ## Quick Start
+
+          ```bash
+          # Test connectivity
+          ansible all -m ping
+
+          # Run the example playbook
+          ansible-playbook playbooks/site.yml
+
+          # Target specific groups
+          ansible privileged -m shell -a "uptime"
+          ansible nvidia_gpu -m shell -a "nvidia-smi"
+          ```
+
+          ## Directory Structure
+
+          ```
+          {{ deployment_name }}/
+          ├── {{ deployment_name }}.pem       # SSH private key (KEEP SECRET!)
+          ├── {{ deployment_name }}.pem.pub   # SSH public key
+          ├── ansible.cfg                     # Ansible configuration
+          ├── inventory/
+          │   ├── hosts.ini                   # Host inventory
+          │   └── group_vars/
+          │       └── all.yml                 # Global variables
+          └── playbooks/
+              └── site.yml                    # Example playbook
+          ```
+
+          ## SSH Access
+
+          ```bash
+          # Direct SSH to any container
+          ssh -i {{ deployment_name }}.pem ansible@<container_ip>
+
+          # Example
+          ssh -i {{ deployment_name }}.pem ansible@{{ (lxc_containers | first).ip.split('/')[0] }}
+          ```
+
+          ## Security Notes
+
+          - The `.pem` file is your private key - **never commit it to git!**
+          - Add `*.pem` to your `.gitignore`
+          - Password authentication is disabled on all containers
+          - UFW firewall is enabled (SSH + ICMP only by default)
+
+          ---
+          *Generated by Proxmox Ubuntu LXC Provisioner*
+        dest: "{{ output_base_dir }}/{{ deployment_name }}/README.md"
+        mode: "0644"
+
+    - name: Generate .gitignore
+      delegate_to: localhost
+      become: false
+      run_once: true
+      ansible.builtin.copy:
+        content: |
+          # SSH Keys - NEVER COMMIT!
+          *.pem
+          *.key
+          id_rsa
+          id_ed25519
+
+          # Ansible
+          *.retry
+          .ansible/
+
+          # OS
+          .DS_Store
+          Thumbs.db
+        dest: "{{ output_base_dir }}/{{ deployment_name }}/.gitignore"
+        mode: "0644"
+
+    #==========================================================================
+    # FINAL CONTAINER STATUS
+    #==========================================================================
+    - name: Show container status
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct status {{ item.id }}
+      args:
+        executable: /bin/bash
+      register: pct_status
+      changed_when: false
+      loop: "{{ lxc_containers }}"
+
+    - name: Print status summaries
+      ansible.builtin.debug:
+        msg: "Container {{ item.item.id }} ({{ item.item.hostname }}): {{ item.stdout | default('') }}"
+      loop: "{{ pct_status.results | default([]) }}"
+
+    - name: Reboot containers to apply all changes
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        pct reboot {{ item.id }} || (sleep 2 && pct start {{ item.id }})
+      args:
+        executable: /bin/bash
+      loop: "{{ lxc_containers }}"
+
+  post_tasks:
+    - name: Display provisioning summary
+      delegate_to: localhost
+      become: false
+      run_once: true
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════════════╗
+          ║                    PROVISIONING COMPLETE                                      ║
+          ╠══════════════════════════════════════════════════════════════════════════════╣
+          ║                                                                              ║
+          ║  Deployment: {{ deployment_name }}
+          ║  Containers: {{ lxc_containers | length }}
+          ║                                                                              ║
+          ║  ANSIBLE PROJECT CREATED:                                                    ║
+          ║    {{ output_base_dir }}/{{ deployment_name }}/                              ║
+          ║                                                                              ║
+          ║  PROJECT STRUCTURE:                                                          ║
+          ║    ├── {{ deployment_name }}.pem          # SSH private key                  ║
+          ║    ├── {{ deployment_name }}.pem.pub      # SSH public key                   ║
+          ║    ├── ansible.cfg                        # Ansible config                   ║
+          ║    ├── README.md                          # Documentation                    ║
+          ║    ├── .gitignore                         # Git ignore file                  ║
+          ║    ├── inventory/                                                            ║
+          ║    │   ├── hosts.ini                      # Host inventory                   ║
+          ║    │   └── group_vars/all.yml             # Variables                        ║
+          ║    └── playbooks/site.yml                 # Example playbook                 ║
+          ║                                                                              ║
+          ║  QUICK START:                                                                ║
+          ║    cd output/{{ deployment_name }}                                           ║
+          ║    ansible all -m ping                                                       ║
+          ║    ansible-playbook playbooks/site.yml                                       ║
+          ║                                                                              ║
+          ║  SSH ACCESS:                                                                 ║
+          ║    ssh -i {{ deployment_name }}.pem ansible@<container_ip>                   ║
+          ║                                                                              ║
+          ║  TO DESTROY:                                                                 ║
+          ║    ansible-playbook -i inventories/hosts.ini playbooks/nuke-provision.yml \  ║
+          ║      -e lxc_map_file={{ lxc_map_file }}                                      ║
+          ║                                                                              ║
+          ╚══════════════════════════════════════════════════════════════════════════════╝

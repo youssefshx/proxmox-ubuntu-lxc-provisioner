@@ -1,0 +1,110 @@
+# =============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - .gitignore
+# =============================================================================
+
+# ==== LOCAL OPERATOR NOTES / AGENT INSTRUCTIONS (DO NOT COMMIT) ====
+# If you want to keep local, operator-specific notes under .github/ without committing,
+# drop them into files matching patterns below.
+.github/*_local.md
+.github/*_private.md
+.github/*_secret.md
+.github/local-notes.md
+
+# ==== INVENTORY FILES (contain your private IPs and configs) ====
+# Copy the .example files and customize for your environment
+inventories/hosts.ini
+inventories/group_vars/all.yml
+inventories/group_vars/proxmox_hosts.yml
+
+# ==== SSH KEYS (CRITICAL - NEVER COMMIT) ====
+output/
+*.pem
+*.key
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+id_ecdsa
+id_ecdsa.pub
+*.ppk
+
+# ==== ANSIBLE ====
+*.retry
+*.log
+.ansible/
+ansible.log
+
+# ==== SECRETS AND CREDENTIALS ====
+secrets/
+*.secret
+*.secrets
+vault_password
+.vault_pass
+.vault_pass.txt
+**/vault.yml
+**/vault.yaml
+**/*_vault.yml
+**/*_vault.yaml
+credentials.yml
+credentials.yaml
+
+# ==== ENVIRONMENT FILES ====
+.env
+.env.*
+*.env
+!.env.example
+
+# ==== PYTHON ====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+env/
+.eggs/
+*.egg-info/
+*.egg
+
+# ==== IDE AND EDITOR ====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+.spyproject/
+
+# ==== OS FILES ====
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ==== TEMPORARY FILES ====
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+tmp/
+temp/
+
+# ==== CUSTOM CONTAINER MAPS (may contain sensitive IPs) ====
+# Uncomment if you want to exclude custom maps:
+# examples/my-*.yml
+# examples/prod-*.yml
+
+# ==== KEEP EXAMPLE FILES (these are templates for users) ====
+!inventories/hosts.ini.example
+!inventories/group_vars/all.yml.example
+!inventories/group_vars/proxmox_hosts.yml.example

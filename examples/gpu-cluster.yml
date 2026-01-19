@@ -1,0 +1,137 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - GPU CLUSTER EXAMPLE
+#==============================================================================
+# Example configuration for a GPU compute cluster with:
+#   - 1 Control plane node (privileged, no GPU)
+#   - 4 GPU worker nodes (nvidia_gpu with full passthrough)
+#
+# USAGE:
+#   ansible-playbook -i inventories/hosts.ini playbooks/provision.yml \
+#     -e lxc_map_file=examples/gpu-cluster.yml
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# LXC DEFAULTS
+#------------------------------------------------------------------------------
+lxc_defaults:
+  template: "gold-public:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+  bridge: vmbr0
+  vlan_tag: 0
+  gateway: 10.0.0.1
+  dns: "1.1.1.1"
+  memory: 8192
+  cores: 4
+
+#------------------------------------------------------------------------------
+# NVIDIA DRIVER CONFIGURATION
+#------------------------------------------------------------------------------
+nvidia:
+  driver_version: "570.86.16"
+
+#------------------------------------------------------------------------------
+# CONTAINER DEFINITIONS
+#------------------------------------------------------------------------------
+lxc_containers:
+  #============================================================================
+  # CONTROL PLANE NODE
+  #============================================================================
+  - id: 500
+    host: 10.22.11.1
+    hostname: gpu-cluster-cp-01
+    ip: 10.0.50.100/16
+    provision_type: privileged          # No GPU needed for control plane
+    memory: 16384
+    cores: 8
+    rootfs: nvme-rbd-ec-5-2:50
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-app-nfs42/cluster-config
+        container_path: /mnt/config
+
+  #============================================================================
+  # GPU WORKER NODES
+  #============================================================================
+  - id: 501
+    host: 10.22.11.1
+    hostname: gpu-worker-01
+    ip: 10.0.50.1/16
+    provision_type: nvidia_gpu          # Full GPU passthrough + drivers
+    memory: 65536
+    cores: 16
+    rootfs: local-lvm:200
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/models
+        container_path: /mnt/models
+        options: ",ro=1"
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/datasets
+        container_path: /mnt/datasets
+        options: ",ro=1"
+      - type: directory
+        host_path: /mnt/pve/gold-app-nfs42/output
+        container_path: /mnt/output
+
+  - id: 502
+    host: 10.22.11.2
+    hostname: gpu-worker-02
+    ip: 10.0.50.2/16
+    provision_type: nvidia_gpu
+    memory: 65536
+    cores: 16
+    rootfs: local-lvm:200
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/models
+        container_path: /mnt/models
+        options: ",ro=1"
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/datasets
+        container_path: /mnt/datasets
+        options: ",ro=1"
+      - type: directory
+        host_path: /mnt/pve/gold-app-nfs42/output
+        container_path: /mnt/output
+
+  - id: 503
+    host: 10.22.11.3
+    hostname: gpu-worker-03
+    ip: 10.0.50.3/16
+    provision_type: nvidia_gpu
+    memory: 65536
+    cores: 16
+    rootfs: local-lvm:200
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/models
+        container_path: /mnt/models
+        options: ",ro=1"
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/datasets
+        container_path: /mnt/datasets
+        options: ",ro=1"
+      - type: directory
+        host_path: /mnt/pve/gold-app-nfs42/output
+        container_path: /mnt/output
+
+  - id: 504
+    host: 10.22.11.4
+    hostname: gpu-worker-04
+    ip: 10.0.50.4/16
+    provision_type: nvidia_gpu
+    memory: 65536
+    cores: 16
+    rootfs: local-lvm:200
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/models
+        container_path: /mnt/models
+        options: ",ro=1"
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/datasets
+        container_path: /mnt/datasets
+        options: ",ro=1"
+      - type: directory
+        host_path: /mnt/pve/gold-app-nfs42/output
+        container_path: /mnt/output

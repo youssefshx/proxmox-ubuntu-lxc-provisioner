@@ -1,0 +1,138 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - DATABASE CLUSTER EXAMPLE
+#==============================================================================
+# Example configuration for a database cluster using ZFS storage.
+#
+# NOTE: The 'database' ZFS storage is ONLY available on host 10.22.11.6!
+#       All database containers must be placed on this host.
+#
+# This example includes:
+#   - 1 PostgreSQL primary
+#   - 2 PostgreSQL replicas
+#   - 1 Redis cache
+#
+# USAGE:
+#   ansible-playbook -i inventories/hosts.ini playbooks/provision.yml \
+#     -e lxc_map_file=examples/database-cluster.yml
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# LXC DEFAULTS
+#------------------------------------------------------------------------------
+lxc_defaults:
+  template: "gold-public:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+  bridge: vmbr0
+  vlan_tag: 0
+  gateway: 10.0.0.1
+  dns: "1.1.1.1"
+  memory: 8192
+  cores: 4
+
+#------------------------------------------------------------------------------
+# CONTAINER DEFINITIONS
+#------------------------------------------------------------------------------
+lxc_containers:
+  #============================================================================
+  # POSTGRESQL PRIMARY (ZFS Storage for data integrity)
+  #============================================================================
+  # ZFS provides:
+  #   - Copy-on-write snapshots for backups
+  #   - Checksumming for data integrity
+  #   - Compression for space efficiency
+  #   - Fast cloning for dev/test environments
+  #============================================================================
+  - id: 300
+    host: 10.22.11.6                      # ONLY host with 'database' ZFS storage
+    hostname: postgres-primary-01
+    ip: 10.0.30.10/16
+    provision_type: privileged            # Needs device access for performance
+    memory: 32768                         # 32GB RAM for database
+    cores: 8
+    rootfs: database:100                  # 100GB on ZFS 'database' pool
+    mounts:
+      # Backup directory on NFS for offsite copies
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/db-backups/postgres-primary
+        container_path: /mnt/backups
+
+  #============================================================================
+  # POSTGRESQL REPLICAS
+  #============================================================================
+  - id: 301
+    host: 10.22.11.6
+    hostname: postgres-replica-01
+    ip: 10.0.30.11/16
+    provision_type: privileged
+    memory: 16384                         # 16GB RAM
+    cores: 4
+    rootfs: database:80                   # 80GB on ZFS
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/db-backups/postgres-replica-01
+        container_path: /mnt/backups
+
+  - id: 302
+    host: 10.22.11.6
+    hostname: postgres-replica-02
+    ip: 10.0.30.12/16
+    provision_type: privileged
+    memory: 16384
+    cores: 4
+    rootfs: database:80
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/db-backups/postgres-replica-02
+        container_path: /mnt/backups
+
+  #============================================================================
+  # REDIS CACHE
+  #============================================================================
+  # Redis can run on local-lvm since it's primarily in-memory
+  # and data can be reconstructed from PostgreSQL if needed
+  #============================================================================
+  - id: 310
+    host: 10.22.11.6
+    hostname: redis-cache-01
+    ip: 10.0.30.20/16
+    provision_type: privileged
+    memory: 8192                          # 8GB RAM for cache
+    cores: 2
+    rootfs: database:20                   # Small disk, mostly RAM-based
+
+  #============================================================================
+  # PGBOUNCER CONNECTION POOLER (Optional)
+  #============================================================================
+  # Unprivileged is fine for a simple connection pooler
+  #============================================================================
+  - id: 320
+    host: 10.22.11.6
+    hostname: pgbouncer-01
+    ip: 10.0.30.30/16
+    provision_type: unprivileged          # No special access needed
+    memory: 2048                          # 2GB RAM is plenty
+    cores: 2
+    rootfs: database:10                   # Minimal disk needed
+
+#==============================================================================
+# POST-PROVISIONING NOTES
+#==============================================================================
+# After provisioning, you'll need to:
+#
+# 1. Install PostgreSQL on database nodes:
+#    sudo apt install -y postgresql postgresql-contrib
+#
+# 2. Open PostgreSQL port in UFW:
+#    sudo ufw allow 5432/tcp
+#
+# 3. Install Redis on cache node:
+#    sudo apt install -y redis-server
+#
+# 4. Open Redis port in UFW:
+#    sudo ufw allow 6379/tcp
+#
+# 5. Configure replication between primary and replicas
+#
+# 6. Set up automated backups using ZFS snapshots:
+#    zfs snapshot database/subvol-300-disk-0@daily-$(date +%Y%m%d)
+#==============================================================================

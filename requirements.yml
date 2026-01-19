@@ -1,0 +1,19 @@
+---
+#==============================================================================
+# ANSIBLE GALAXY REQUIREMENTS
+#==============================================================================
+# Install with: ansible-galaxy install -r requirements.yml
+#==============================================================================
+
+collections:
+  # Community Crypto - Required for SSH key generation
+  - name: community.crypto
+    version: ">=2.0.0"
+
+  # Community General - Useful utilities and modules
+  - name: community.general
+    version: ">=6.0.0"
+
+  # Ansible POSIX - POSIX system modules
+  - name: ansible.posix
+    version: ">=1.5.0"

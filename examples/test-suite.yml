@@ -1,0 +1,334 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - COMPREHENSIVE TEST SUITE
+#==============================================================================
+# This test suite validates all provisioner options including:
+#   - All storage backends (local-lvm, nvme-rbd-ec-5-2, gold-public,
+#     gold-app-nfs42, gold-data-nfs42, database)
+#   - All provision types (unprivileged, privileged, nvidia_gpu)
+#   - Directory mounts with read/write verification
+#   - VLAN tagging (VLAN 22)
+#   - Docker installation and hello-world test
+#   - NVIDIA GPU passthrough and driver verification
+#   - Internet connectivity
+#
+# TEST HOSTS: 10.22.11.6, 10.22.11.7, 10.22.11.8
+# CONTAINER SPECS: 4 cores, 2GB RAM, 10GB rootfs
+#
+# USAGE:
+#   ansible-playbook -i inventories/hosts.ini playbooks/provision.yml \
+#     -e lxc_map_file=examples/test-suite.yml
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# LXC DEFAULTS FOR TESTING
+#------------------------------------------------------------------------------
+lxc_defaults:
+  template: "gold-public:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+  bridge: vmbr0
+  vlan_tag: 0
+  gateway: 10.0.0.1
+  dns: "1.1.1.1"
+  memory: 2048
+  cores: 4
+
+#------------------------------------------------------------------------------
+# NVIDIA DRIVER FOR GPU TESTS
+#------------------------------------------------------------------------------
+nvidia:
+  driver_version: "570.86.16"
+
+#------------------------------------------------------------------------------
+# TEST CONTAINERS
+#------------------------------------------------------------------------------
+lxc_containers:
+  #============================================================================
+  # STORAGE TYPE TESTS - LOCAL-LVM
+  #============================================================================
+  #
+  # VMID NOTE:
+  # These IDs were bumped to avoid collisions with pre-existing test containers.
+  # If you hit collisions again, bump the whole block by +10 (or +100).
+  #
+  # Test 1: local-lvm + unprivileged
+  - id: 9101
+    host: 10.22.11.6
+    hostname: test-locallvm-unpriv
+    ip: 10.0.90.1/16
+    provision_type: unprivileged
+    memory: 2048
+    cores: 4
+    rootfs: local-lvm:10
+
+  # Test 2: local-lvm + privileged
+  - id: 9102
+    host: 10.22.11.7
+    hostname: test-locallvm-priv
+    ip: 10.0.90.2/16
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: local-lvm:10
+
+  # Test 3: local-lvm + nvidia_gpu
+  - id: 9103
+    host: 10.22.11.8
+    hostname: test-locallvm-gpu
+    ip: 10.0.90.3/16
+    provision_type: nvidia_gpu
+    memory: 2048
+    cores: 4
+    rootfs: local-lvm:10
+
+  #============================================================================
+  # STORAGE TYPE TESTS - NVME-RBD-EC-5-2 (Ceph)
+  #============================================================================
+
+  # Test 4: nvme-rbd-ec-5-2 + unprivileged
+  - id: 9104
+    host: 10.22.11.6
+    hostname: test-ceph-unpriv
+    ip: 10.0.90.4/16
+    provision_type: unprivileged
+    memory: 2048
+    cores: 4
+    rootfs: nvme-rbd-ec-5-2:10
+
+  # Test 5: nvme-rbd-ec-5-2 + privileged
+  - id: 9105
+    host: 10.22.11.7
+    hostname: test-ceph-priv
+    ip: 10.0.90.5/16
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: nvme-rbd-ec-5-2:10
+
+  # Test 6: nvme-rbd-ec-5-2 + nvidia_gpu
+  - id: 9106
+    host: 10.22.11.8
+    hostname: test-ceph-gpu
+    ip: 10.0.90.6/16
+    provision_type: nvidia_gpu
+    memory: 2048
+    cores: 4
+    rootfs: nvme-rbd-ec-5-2:10
+
+  #============================================================================
+  # TEMPLATE STORAGE TEST - GOLD-PUBLIC (TEMPLATES ONLY)
+  #============================================================================
+  #
+  # IMPORTANT:
+  # gold-public is intended for LXC templates (vztmpl) and *not* rootfs.
+  # Rootfs tests for gold-public were removed because Proxmox returns:
+  #   "storage 'gold-public' does not support container directories"
+  #
+  # We still validate gold-public by:
+  #   - using it as the template source (lxc_defaults.template)
+  #   - using it as a bind-mount source path in mount tests (gold-data-nfs42)
+  #
+  #============================================================================
+  # STORAGE TYPE TESTS - GOLD-APP-NFS42
+  #============================================================================
+
+  # Test 9: gold-app-nfs42 + unprivileged
+  - id: 9109
+    host: 10.22.11.6
+    hostname: test-goldapp-unpriv
+    ip: 10.0.90.9/16
+    provision_type: unprivileged
+    memory: 2048
+    cores: 4
+    rootfs: gold-app-nfs42:10
+
+  # Test 10: gold-app-nfs42 + privileged
+  - id: 9110
+    host: 10.22.11.7
+    hostname: test-goldapp-priv
+    ip: 10.0.90.10/16
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: gold-app-nfs42:10
+
+  #============================================================================
+  # STORAGE TYPE TESTS - GOLD-DATA-NFS42
+  #============================================================================
+
+  # Test 11: gold-data-nfs42 + unprivileged
+  - id: 9111
+    host: 10.22.11.6
+    hostname: test-golddata-unpriv
+    ip: 10.0.90.11/16
+    provision_type: unprivileged
+    memory: 2048
+    cores: 4
+    rootfs: gold-data-nfs42:10
+
+  # Test 12: gold-data-nfs42 + privileged
+  - id: 9112
+    host: 10.22.11.7
+    hostname: test-golddata-priv
+    ip: 10.0.90.12/16
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: gold-data-nfs42:10
+
+  #============================================================================
+  # STORAGE TYPE TESTS - DATABASE (ZFS) - HOST 10.22.11.6 ONLY!
+  #============================================================================
+
+  # Test 13: database (ZFS) + unprivileged
+  - id: 9113
+    host: 10.22.11.6
+    hostname: test-zfs-unpriv
+    ip: 10.0.90.13/16
+    provision_type: unprivileged
+    memory: 2048
+    cores: 4
+    rootfs: database:10
+
+  # Test 14: database (ZFS) + privileged
+  - id: 9114
+    host: 10.22.11.6
+    hostname: test-zfs-priv
+    ip: 10.0.90.14/16
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: database:10
+
+  #============================================================================
+  # MOUNT TESTS - DIRECTORY BIND MOUNTS
+  #============================================================================
+
+  # Test 15: Privileged with gold-data-nfs42 mount for file read/write test
+  - id: 9115
+    host: 10.22.11.7
+    hostname: test-mount-rw
+    ip: 10.0.90.15/16
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: local-lvm:10
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/test
+        container_path: /mnt/test
+
+  # Test 16: Privileged with read-only mount
+  - id: 9116
+    host: 10.22.11.8
+    hostname: test-mount-ro
+    ip: 10.0.90.16/16
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: local-lvm:10
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/test
+        container_path: /mnt/test-readonly
+        options: ",ro=1"
+
+  # Test 17: Multiple mounts test
+  - id: 9117
+    host: 10.22.11.6
+    hostname: test-mount-multi
+    ip: 10.0.90.17/16
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: local-lvm:10
+    mounts:
+      - type: directory
+        host_path: /mnt/pve/gold-data-nfs42/test
+        container_path: /mnt/data
+      - type: directory
+        host_path: /mnt/pve/gold-app-nfs42/appdata
+        container_path: /mnt/appdata
+
+  #============================================================================
+  # VLAN TEST - VLAN 22 with 10.22.x.x/16
+  #============================================================================
+
+  # Test 18: VLAN 22 tagging test
+  - id: 9118
+    host: 10.22.11.7
+    hostname: test-vlan22
+    ip: 10.22.90.18/16
+    vlan_tag: 22
+    gateway: 10.22.0.1
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: local-lvm:10
+
+  #============================================================================
+  # DOCKER TEST - Install and run hello-world
+  #============================================================================
+
+  # Test 19: Docker installation test (privileged required)
+  - id: 9119
+    host: 10.22.11.8
+    hostname: test-docker
+    ip: 10.0.90.19/16
+    provision_type: privileged
+    memory: 2048
+    cores: 4
+    rootfs: local-lvm:10
+
+  #============================================================================
+  # INTERNET CONNECTIVITY TEST
+  #============================================================================
+
+  # Test 20: Internet connectivity verification
+  - id: 9120
+    host: 10.22.11.6
+    hostname: test-internet
+    ip: 10.0.90.20/16
+    provision_type: unprivileged
+    memory: 2048
+    cores: 4
+    rootfs: local-lvm:10
+
+#==============================================================================
+# POST-PROVISIONING VERIFICATION TESTS
+#==============================================================================
+# After provisioning, run these verification commands:
+#
+# 1. STORAGE VERIFICATION (all containers):
+#    pct exec <id> -- df -h /
+#    pct exec <id> -- dd if=/dev/urandom of=/tmp/testfile bs=1M count=10
+#    pct exec <id> -- rm /tmp/testfile
+#
+# 2. MOUNT VERIFICATION (test-mount-rw - ID 9015):
+#    pct exec 9015 -- ls -la /mnt/test/
+#    pct exec 9015 -- dd if=/dev/urandom of=/mnt/test/random_$(date +%s).bin bs=1K count=100
+#    pct exec 9015 -- find /mnt/test -name "*.jpg" -exec ls -la {} \;
+#
+# 3. NVIDIA GPU VERIFICATION (GPU containers - 9003, 9006):
+#    pct exec 9003 -- nvidia-smi
+#    pct exec 9006 -- nvidia-smi
+#
+# 4. VLAN VERIFICATION (test-vlan22 - ID 9018):
+#    pct exec 9018 -- ip addr show eth0
+#    pct exec 9018 -- ping -c 3 10.22.0.1
+#
+# 5. DOCKER VERIFICATION (test-docker - ID 9019):
+#    pct exec 9019 -- apt update
+#    pct exec 9019 -- apt install -y docker.io
+#    pct exec 9019 -- systemctl start docker
+#    pct exec 9019 -- docker run hello-world
+#
+# 6. INTERNET VERIFICATION (all containers):
+#    pct exec <id> -- ping -c 3 8.8.8.8
+#    pct exec <id> -- curl -s https://ifconfig.me
+#
+# 7. SSH KEY VERIFICATION:
+#    ssh -i output/test-locallvm-unpriv/id_ed25519 ansible@10.0.90.1 'echo SUCCESS'
+#
+# 8. UFW VERIFICATION:
+#    pct exec <id> -- ufw status
+#==============================================================================

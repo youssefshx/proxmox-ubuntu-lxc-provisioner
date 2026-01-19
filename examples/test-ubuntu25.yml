@@ -1,0 +1,76 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - UBUNTU 25.04 TEST
+#==============================================================================
+# Test configuration for Ubuntu 25.04 (Plucky Puffin) provisioning.
+# Creates a single privileged container to validate Ubuntu 25.04 support.
+#
+# PREREQUISITES:
+#   1. Download the Ubuntu 25.04 template to your Proxmox storage:
+#      pveam download local ubuntu-25.04-standard_25.04-1_amd64.tar.zst
+#
+#   2. Update hosts.ini with your Proxmox host
+#
+# USAGE:
+#   ansible-playbook -i inventories/hosts.ini playbooks/provision.yml \
+#     -e lxc_map_file=examples/test-ubuntu25.yml
+#
+# CLEANUP:
+#   ansible-playbook -i inventories/hosts.ini playbooks/nuke-provision.yml \
+#     -e lxc_map_file=examples/test-ubuntu25.yml
+#
+# ESTIMATED TIME: ~3-5 minutes
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# LXC DEFAULTS
+#------------------------------------------------------------------------------
+lxc_defaults:
+  # Ubuntu 25.04 (Plucky Puffin) - Latest release
+  template: "gold-public:vztmpl/ubuntu-25.04-standard_25.04-1.1_amd64.tar.zst"
+
+  # Network configuration - CUSTOMIZE FOR YOUR ENVIRONMENT
+  bridge: vmbr0
+  vlan_tag: 0
+  gateway: 10.0.0.1 # <-- CHANGE: Your network gateway
+  dns: "1.1.1.1"
+
+  # Container resources
+  memory: 2048
+  cores: 2
+
+#------------------------------------------------------------------------------
+# TEST CONTAINER
+#------------------------------------------------------------------------------
+lxc_containers:
+  - id: 9901
+    host: 10.22.11.6 # <-- CHANGE: Your Proxmox host IP
+    hostname: test-ubuntu25
+    ip: 10.0.99.25/16 # <-- CHANGE: Available IP on your network
+    provision_type: privileged
+    memory: 2048
+    cores: 2
+    rootfs: local-lvm:10
+
+#==============================================================================
+# POST-PROVISIONING VERIFICATION
+#==============================================================================
+# After provisioning, verify Ubuntu 25.04:
+#
+# 1. Test Ansible connectivity:
+#    cd output/test-ubuntu25
+#    ansible all -m ping
+#
+# 2. Check Ubuntu version:
+#    ansible all -m shell -a "cat /etc/os-release | grep -E 'VERSION|PRETTY'"
+#
+# 3. Verify it's Ubuntu 25.04:
+#    ansible all -m shell -a "lsb_release -a"
+#
+# 4. SSH directly:
+#    ssh -i test-ubuntu25.pem ansible@10.0.99.25
+#
+# Expected output should show:
+#   PRETTY_NAME="Ubuntu 25.04 LTS"
+#   VERSION="25.04 (Plucky Puffin)"
+#==============================================================================

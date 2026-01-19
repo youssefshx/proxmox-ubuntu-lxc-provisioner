@@ -1,0 +1,118 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - MOUNT PREPARATION TASKS
+#==============================================================================
+# Prepare a single mount for a container based on mount definitions.
+#
+# SUPPORTED MOUNT TYPES:
+#   - directory    : Bind mount from host path
+#   - zfs_volume   : ZFS sparse volume
+#   - lvm_lv       : LVM logical volume
+#   - storage      : Proxmox-managed storage (auto-created by pct)
+#
+# EXPECTED VARIABLES:
+#   - item         : Container definition
+#   - mount        : Mount definition from item.mounts
+#==============================================================================
+
+- name: "Ensure mount prerequisites for container {{ item.id }} ({{ item.hostname }})"
+  vars:
+    zfs_pool: "{{ mount.pool | default(lxc_defaults.zfs_pool | default('')) }}"
+    fstype: "{{ mount.fstype | default('ext4') }}"
+  block:
+    #==========================================================================
+    # DIRECTORY BIND MOUNT
+    #==========================================================================
+    - name: Prepare directory when type=directory
+      when: mount.type == 'directory'
+      block:
+        - name: Check if path is a mount point
+          ansible.builtin.shell: mountpoint -q "{{ mount.host_path }}"
+          register: is_mountpoint
+          failed_when: false
+          changed_when: false
+
+        - name: Create directory (not on mount point)
+          ansible.builtin.file:
+            path: "{{ mount.host_path }}"
+            state: directory
+            mode: '0755'
+          when: is_mountpoint.rc != 0
+
+        - name: Ensure mount point directory exists
+          ansible.builtin.file:
+            path: "{{ mount.host_path }}"
+            state: directory
+          when: is_mountpoint.rc == 0
+
+    #==========================================================================
+    # ZFS VOLUME (SPARSE)
+    #==========================================================================
+    - name: Prepare ZFS volume when type=zfs_volume
+      when: mount.type == 'zfs_volume'
+      block:
+        - name: Check if ZFS volume exists
+          ansible.builtin.shell: |
+            zfs list -H -o name {{ zfs_pool }}/{{ mount.name }}
+          args:
+            executable: /bin/bash
+          register: zvol_check
+          failed_when: false
+          changed_when: false
+
+        - name: Create ZFS volume (sparse)
+          ansible.builtin.shell: |
+            zfs create -V {{ mount.size }} -s {{ zfs_pool }}/{{ mount.name }}
+          args:
+            executable: /bin/bash
+          when: zvol_check.rc != 0
+
+        - name: Ensure filesystem exists on the zvol
+          ansible.builtin.shell: |
+            blkid /dev/zvol/{{ zfs_pool }}/{{ mount.name }} || \
+            mkfs.{{ fstype }} /dev/zvol/{{ zfs_pool }}/{{ mount.name }} -F
+          args:
+            executable: /bin/bash
+
+    #==========================================================================
+    # LVM LOGICAL VOLUME
+    #==========================================================================
+    - name: Prepare LVM logical volume when type=lvm_lv
+      when: mount.type == 'lvm_lv'
+      block:
+        - name: Check if LVM logical volume exists
+          ansible.builtin.shell: |
+            lvdisplay /dev/{{ mount.vg }}/{{ mount.lv }}
+          args:
+            executable: /bin/bash
+          register: lv_check
+          failed_when: false
+          changed_when: false
+
+        - name: Create LVM logical volume
+          ansible.builtin.shell: |
+            lvcreate -L {{ mount.size }} -n {{ mount.lv }} {{ mount.vg }}
+          args:
+            executable: /bin/bash
+          when: lv_check.rc != 0 and mount.size is defined
+
+        - name: Ensure filesystem exists on the LV
+          ansible.builtin.shell: |
+            blkid /dev/{{ mount.vg }}/{{ mount.lv }} || \
+            mkfs.{{ fstype }} /dev/{{ mount.vg }}/{{ mount.lv }}
+          args:
+            executable: /bin/bash
+
+    #==========================================================================
+    # PROXMOX STORAGE (Ceph RBD, local-lvm, etc.)
+    #==========================================================================
+    # NOTE: type=storage requires no preparation!
+    # Proxmox auto-creates volumes via pvesm during 'pct create' with storage:SIZE format
+    # This works with: Ceph RBD, LVM-thin, ZFS, Directory, and any Proxmox storage backend
+
+    - name: Log storage mount (no preparation needed)
+      when: mount.type == 'storage'
+      ansible.builtin.debug:
+        msg: |
+          Storage mount '{{ mount.storage }}:{{ mount.size }}' will be auto-created by Proxmox.
+          Target: {{ mount.container_path }}

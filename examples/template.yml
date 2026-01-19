@@ -1,0 +1,134 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - CONTAINER MAP TEMPLATE
+#==============================================================================
+# This file defines the LXC containers to be provisioned.
+#
+# PROVISION TYPES:
+#   - unprivileged : Most secure, no device passthrough
+#   - privileged   : Full device access, no GPU (default)
+#   - nvidia_gpu   : Full GPU passthrough with NVIDIA drivers
+#
+# STORAGE BACKENDS AVAILABLE:
+#   - local-lvm       : Local LVM storage (all hosts)
+#   - nvme-rbd-ec-5-2 : Ceph RBD erasure coded (distributed, HA)
+#   - gold-public     : NFS for templates and shared images
+#   - gold-app-nfs42  : NFS 4.2 for application data
+#   - gold-data-nfs42 : NFS 4.2 for data with distributed locking
+#   - database        : ZFS storage (10.22.11.6 ONLY)
+#
+# USAGE:
+#   ansible-playbook -i inventories/hosts.ini playbooks/provision.yml \
+#     -e lxc_map_file=examples/template.yml
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# LXC DEFAULTS (can be overridden per container)
+#------------------------------------------------------------------------------
+lxc_defaults:
+  # Ubuntu template (stored on gold-public)
+  # Options: ubuntu-22.04, ubuntu-24.04, ubuntu-25.04
+  template: "gold-public:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+
+  # Network configuration
+  bridge: vmbr0
+  vlan_tag: 0
+  gateway: 10.0.0.1
+  dns: "1.1.1.1"
+
+  # Default resources
+  memory: 2048 # MB
+  cores: 2
+
+#------------------------------------------------------------------------------
+# NVIDIA DRIVER CONFIGURATION (only used for nvidia_gpu provision type)
+#------------------------------------------------------------------------------
+nvidia:
+  driver_version: "570.86.16"
+
+#------------------------------------------------------------------------------
+# CONTAINER DEFINITIONS
+#------------------------------------------------------------------------------
+lxc_containers:
+  #============================================================================
+  # EXAMPLE 1: Unprivileged Container (Most Secure)
+  #============================================================================
+  # Best for: Web apps, APIs, services that don't need device access
+  #
+  # - id: 100
+  #   host: 10.22.11.6                    # Proxmox host IP
+  #   hostname: web-server-01
+  #   ip: 10.0.1.100/16
+  #   provision_type: unprivileged        # Most secure
+  #   memory: 2048
+  #   cores: 2
+  #   rootfs: local-lvm:20                # 20GB on local LVM
+
+  #============================================================================
+  # EXAMPLE 2: Privileged Container (No GPU)
+  #============================================================================
+  # Best for: Docker, Kubernetes, system services needing device access
+  #
+  # - id: 101
+  #   host: 10.22.11.7
+  #   hostname: docker-host-01
+  #   ip: 10.0.1.101/16
+  #   provision_type: privileged          # Default if not specified
+  #   memory: 8192
+  #   cores: 4
+  #   rootfs: nvme-rbd-ec-5-2:50          # 50GB on Ceph RBD
+  #   mounts:
+  #     - type: directory
+  #       host_path: /mnt/pve/gold-data-nfs42/shared
+  #       container_path: /mnt/shared
+  #     - type: directory
+  #       host_path: /mnt/pve/gold-app-nfs42/appdata
+  #       container_path: /mnt/appdata
+
+  #============================================================================
+  # EXAMPLE 3: NVIDIA GPU Container
+  #============================================================================
+  # Best for: ML/AI workloads, GPU compute, CUDA applications
+  # Note: NVIDIA drivers will be automatically installed
+  #
+  # - id: 102
+  #   host: 10.22.11.8                    # Must have NVIDIA GPU
+  #   hostname: gpu-worker-01
+  #   ip: 10.0.1.102/16
+  #   provision_type: nvidia_gpu          # GPU passthrough + driver install
+  #   memory: 32768
+  #   cores: 8
+  #   rootfs: local-lvm:100               # 100GB on local LVM
+  #   mounts:
+  #     - type: directory
+  #       host_path: /mnt/pve/gold-data-nfs42/models
+  #       container_path: /mnt/models
+  #       options: ",ro=1"                # Read-only mount
+
+  #============================================================================
+  # EXAMPLE 4: Database Container (ZFS - Host 10.22.11.6 Only)
+  #============================================================================
+  # Best for: PostgreSQL, MySQL, databases requiring ZFS features
+  #
+  # - id: 103
+  #   host: 10.22.11.6                    # ONLY this host has 'database' storage
+  #   hostname: postgres-01
+  #   ip: 10.0.1.103/16
+  #   provision_type: privileged
+  #   memory: 16384
+  #   cores: 4
+  #   rootfs: database:50                 # 50GB on ZFS 'database' pool
+
+  #============================================================================
+  # YOUR CONTAINERS - Uncomment and modify the examples above
+  #============================================================================
+
+  # Placeholder container (remove this and add your own)
+  - id: 999
+    host: 10.22.11.6
+    hostname: placeholder-remove-me
+    ip: 10.0.99.99/16
+    provision_type: unprivileged
+    memory: 1024
+    cores: 1
+    rootfs: local-lvm:8

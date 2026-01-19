@@ -1,0 +1,176 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - NUKE (DESTROY) PLAYBOOK
+#==============================================================================
+# Stops and destroys all LXC containers defined in the specified map file.
+# Also cleans up generated SSH keys and inventory files from the output folder.
+#
+# USAGE:
+#   ansible-playbook -i inventories/hosts.ini playbooks/nuke-provision.yml \
+#     -e lxc_map_file=examples/test-suite.yml
+#
+# OPTIONS:
+#   -e skip_confirmation=true   Skip the confirmation prompt
+#   -e keep_output=true         Keep SSH keys and inventory files
+#
+# WARNING: This is DESTRUCTIVE and IRREVERSIBLE!
+#==============================================================================
+
+- name: NUKE - Destroy LXC containers from map file
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: false
+
+  vars:
+    # Default map file; override with: -e lxc_map_file=examples/your_map.yml
+    lxc_map_file: "examples/template.yml"
+
+    # Output directory (to clean up SSH keys and inventories)
+    output_base_dir: "{{ playbook_dir }}/../output"
+
+    # Safety flags
+    skip_confirmation: false
+    keep_output: false
+
+  pre_tasks:
+    #==========================================================================
+    # LOAD CONFIGURATION
+    #==========================================================================
+    - name: Load container map file
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../{{ lxc_map_file }}"
+
+    - name: Display destruction plan
+      run_once: true
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════════════╗
+          ║                    ⚠️  DESTRUCTION PLAN  ⚠️                                   ║
+          ╠══════════════════════════════════════════════════════════════════════════════╣
+          ║                                                                              ║
+          ║  Map File: {{ lxc_map_file | default('NOT SPECIFIED') }}
+          ║                                                                              ║
+          ║  The following containers will be PERMANENTLY DESTROYED:                     ║
+          ║                                                                              ║
+          {% for c in lxc_containers %}
+          ║    • ID {{ c.id }}: {{ c.hostname }} on {{ c.host }} ({{ c.ip.split('/')[0] }})
+          {% endfor %}
+          ║                                                                              ║
+          ║  Total containers: {{ lxc_containers | length }}
+          ║                                                                              ║
+          ╚══════════════════════════════════════════════════════════════════════════════╝
+
+    - name: Confirmation pause (skip with -e skip_confirmation=true)
+      when: not (skip_confirmation | bool)
+      run_once: true
+      ansible.builtin.pause:
+        prompt: |
+
+          ⚠️  WARNING: This will PERMANENTLY DESTROY {{ lxc_containers | length }} container(s)!
+
+          Press ENTER to continue or Ctrl+C to abort...
+
+  tasks:
+    #==========================================================================
+    # STOP CONTAINERS
+    #==========================================================================
+    - name: Stop running containers (ignore if already stopped)
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        if pct status {{ item.id }} 2>/dev/null | grep -q "running"; then
+          echo "Stopping container {{ item.id }}..."
+          pct stop {{ item.id }} --timeout 30
+        else
+          echo "Container {{ item.id }} is not running or doesn't exist"
+        fi
+      args:
+        executable: /bin/bash
+      register: stop_result
+      changed_when: "'Stopping' in stop_result.stdout"
+      failed_when: false
+      loop: "{{ lxc_containers }}"
+
+    - name: Wait for containers to fully stop
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        for i in {1..30}; do
+          status=$(pct status {{ item.id }} 2>/dev/null || echo "stopped")
+          if echo "$status" | grep -q "stopped"; then
+            echo "Container {{ item.id }} stopped"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "Timeout waiting for {{ item.id }} to stop"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      loop: "{{ lxc_containers }}"
+
+    #==========================================================================
+    # DESTROY CONTAINERS
+    #==========================================================================
+    - name: Destroy containers
+      when: item.host == inventory_hostname
+      ansible.builtin.shell: |
+        if pct status {{ item.id }} &>/dev/null; then
+          echo "Destroying container {{ item.id }} ({{ item.hostname }})..."
+          pct destroy {{ item.id }} --purge --force
+          echo "✓ Container {{ item.id }} destroyed"
+        else
+          echo "Container {{ item.id }} does not exist, skipping"
+        fi
+      args:
+        executable: /bin/bash
+      register: destroy_result
+      changed_when: "'destroyed' in destroy_result.stdout"
+      failed_when: false
+      loop: "{{ lxc_containers }}"
+
+    - name: Display destruction results
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines | default(['No output']) }}"
+      loop: "{{ destroy_result.results | default([]) }}"
+      when: item.stdout is defined
+
+    #==========================================================================
+    # CLEANUP OUTPUT DIRECTORY
+    #==========================================================================
+    - name: Clean up output directories (SSH keys and inventories)
+      when: not (keep_output | bool)
+      delegate_to: localhost
+      become: false
+      run_once: true
+      block:
+        - name: Remove individual container output folders
+          ansible.builtin.file:
+            path: "{{ output_base_dir }}/{{ item.hostname }}"
+            state: absent
+          loop: "{{ lxc_containers }}"
+
+        - name: Remove unified deployment folder if it exists
+          ansible.builtin.file:
+            path: "{{ output_base_dir }}/{{ (lxc_map_file | basename | splitext)[0] }}"
+            state: absent
+
+  post_tasks:
+    - name: Display summary
+      run_once: true
+      delegate_to: localhost
+      become: false
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════════════════╗
+          ║                    💥 NUKE COMPLETE 💥                                        ║
+          ╠══════════════════════════════════════════════════════════════════════════════╣
+          ║                                                                              ║
+          ║  Containers destroyed: {{ lxc_containers | length }}
+          ║  Output cleanup: {{ 'SKIPPED (keep_output=true)' if (keep_output | bool) else 'COMPLETED' }}
+          ║                                                                              ║
+          ║  Destroyed containers:                                                       ║
+          {% for c in lxc_containers %}
+          ║    ✗ {{ c.id }}: {{ c.hostname }}
+          {% endfor %}
+          ║                                                                              ║
+          ╚══════════════════════════════════════════════════════════════════════════════╝

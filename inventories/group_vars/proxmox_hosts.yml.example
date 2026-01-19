@@ -1,0 +1,159 @@
+---
+#==============================================================================
+# PROXMOX HOSTS - GROUP SPECIFIC VARIABLES (EXAMPLE)
+#==============================================================================
+# Copy this file to proxmox_hosts.yml and customize for your environment:
+#   cp proxmox_hosts.yml.example proxmox_hosts.yml
+#
+# These variables apply specifically to hosts in the [proxmox_hosts] group.
+# They extend/override the defaults from all.yml
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# PROXMOX HOST REQUIREMENTS
+#------------------------------------------------------------------------------
+# Required kernel modules for LXC containers
+required_kernel_modules:
+  - overlay
+  - ip_tables
+  - ip6_tables
+  - nf_nat
+  - xt_conntrack
+  - br_netfilter
+
+#------------------------------------------------------------------------------
+# SYSCTL CONFIGURATION FOR CONTAINERS
+#------------------------------------------------------------------------------
+sysctl_settings:
+  # Bridge netfilter (required for container networking)
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+  # IP forwarding
+  net.ipv4.ip_forward: 1
+  net.ipv6.conf.all.forwarding: 1
+
+#------------------------------------------------------------------------------
+# LXC SECURITY PROFILES BY PROVISION TYPE
+#------------------------------------------------------------------------------
+lxc_profiles:
+  # Unprivileged containers - minimal config
+  unprivileged:
+    config: |
+      # === UNPRIVILEGED CONTAINER SETTINGS ===
+      lxc.prlimit.memlock: unlimited
+      lxc.prlimit.nofile: 1048576
+      lxc.prlimit.nproc: unlimited
+
+  # Privileged containers - full device access
+  privileged:
+    config: |
+      # === PRIVILEGED CONTAINER SETTINGS ===
+      lxc.apparmor.profile = unconfined
+      lxc.cgroup2.devices.allow: a
+      lxc.cgroup2.devices.allow: b
+      lxc.cgroup2.devices.allow: c
+      lxc.mount.auto: proc:rw sys:rw cgroup:rw
+
+      # === ESSENTIAL DEVICE ACCESS ===
+      lxc.mount.entry: /dev/full dev/full none bind,optional,create=file
+      lxc.mount.entry: /dev/null dev/null none bind,optional,create=file
+      lxc.mount.entry: /dev/random dev/random none bind,optional,create=file
+      lxc.mount.entry: /dev/tty dev/tty none bind,optional,create=file
+      lxc.mount.entry: /dev/urandom dev/urandom none bind,optional,create=file
+      lxc.mount.entry: /dev/zero dev/zero none bind,optional,create=file
+
+      # === SYSTEM REQUIREMENTS ===
+      lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
+      lxc.mount.entry: /sys/kernel/security sys/kernel/security none bind,optional
+      lxc.mount.entry: /sys/fs/fuse/connections sys/fs/fuse/connections none bind,optional
+
+      # === CONTAINER RUNTIME SUPPORT ===
+      lxc.mount.entry: /dev/fuse dev/fuse none bind,optional,create=file
+      lxc.mount.entry: /proc/sys/kernel/keys proc/sys/kernel/keys none bind,optional
+
+      # === SECURITY AND LIMITS ===
+      lxc.prlimit.memlock: unlimited
+      lxc.prlimit.nofile: 1048576
+      lxc.prlimit.nproc: unlimited
+
+  # NVIDIA GPU containers - privileged + GPU passthrough
+  nvidia_gpu:
+    config: |
+      # === NVIDIA GPU CONTAINER SETTINGS ===
+      lxc.apparmor.profile = unconfined
+      lxc.cgroup2.devices.allow: a
+      lxc.cgroup2.devices.allow: b
+      lxc.cgroup2.devices.allow: c
+      lxc.mount.auto: proc:rw sys:rw cgroup:rw
+
+      # === ESSENTIAL DEVICE ACCESS ===
+      lxc.mount.entry: /dev/full dev/full none bind,optional,create=file
+      lxc.mount.entry: /dev/null dev/null none bind,optional,create=file
+      lxc.mount.entry: /dev/random dev/random none bind,optional,create=file
+      lxc.mount.entry: /dev/tty dev/tty none bind,optional,create=file
+      lxc.mount.entry: /dev/urandom dev/urandom none bind,optional,create=file
+      lxc.mount.entry: /dev/zero dev/zero none bind,optional,create=file
+
+      # === SYSTEM REQUIREMENTS ===
+      lxc.mount.entry: /dev/kmsg dev/kmsg none bind,optional,create=file
+      lxc.mount.entry: /sys/kernel/security sys/kernel/security none bind,optional
+      lxc.mount.entry: /sys/fs/fuse/connections sys/fs/fuse/connections none bind,optional
+
+      # === CONTAINER RUNTIME SUPPORT ===
+      lxc.mount.entry: /dev/fuse dev/fuse none bind,optional,create=file
+      lxc.mount.entry: /proc/sys/kernel/keys proc/sys/kernel/keys none bind,optional
+
+      # === SECURITY AND LIMITS ===
+      lxc.prlimit.memlock: unlimited
+      lxc.prlimit.nofile: 1048576
+      lxc.prlimit.nproc: unlimited
+
+      # === GPU PASSTHROUGH (dynamically added by playbook) ===
+      # nvidia-caps directory
+      lxc.cgroup2.devices.allow: c 510:* rwm
+      lxc.mount.entry: /dev/nvidia-caps dev/nvidia-caps none bind,optional,create=dir
+
+#------------------------------------------------------------------------------
+# TEMPLATE DOWNLOAD SETTINGS
+#------------------------------------------------------------------------------
+template_download:
+  # Timeout for template downloads (seconds)
+  timeout: 600
+  # Retry attempts
+  retries: 3
+  # Delay between retries (seconds)
+  retry_delay: 10
+
+#------------------------------------------------------------------------------
+# CONTAINER CREATION DEFAULTS
+#------------------------------------------------------------------------------
+container_defaults:
+  # Default memory (MB)
+  memory: 2048
+  # Default CPU cores
+  cores: 2
+  # Default rootfs size
+  rootfs_size: "20G"
+  # Swap (disabled for containers)
+  swap: 0
+  # OS type
+  ostype: "ubuntu"
+  # Start on boot
+  onboot: true
+
+#------------------------------------------------------------------------------
+# HOST-SPECIFIC CONFIGURATIONS (Optional)
+#------------------------------------------------------------------------------
+# Use this section to define storage or settings that are only available
+# on specific Proxmox hosts.
+#
+# Example: ZFS storage only on one host
+# host_storage_map:
+#   "192.168.1.10":
+#     additional_storage:
+#       - "zfs-pool"  # ZFS storage only on this host
+#
+# Example: GPU hosts
+# gpu_hosts:
+#   - "192.168.1.11"
+#   - "192.168.1.12"

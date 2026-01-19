@@ -1,0 +1,75 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - SIMPLE WEBSERVER EXAMPLE
+#==============================================================================
+# Example configuration for a simple web server container.
+# Uses unprivileged mode for maximum security.
+#
+# USAGE:
+#   ansible-playbook -i inventories/hosts.ini playbooks/provision.yml \
+#     -e lxc_map_file=examples/simple-webserver.yml
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# LXC DEFAULTS
+#------------------------------------------------------------------------------
+lxc_defaults:
+  template: "gold-public:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+  bridge: vmbr0
+  vlan_tag: 0
+  gateway: 10.0.0.1
+  dns: "1.1.1.1"
+  memory: 2048
+  cores: 2
+
+#------------------------------------------------------------------------------
+# CONTAINER DEFINITIONS
+#------------------------------------------------------------------------------
+lxc_containers:
+  #============================================================================
+  # SIMPLE WEB SERVER (Unprivileged - Most Secure)
+  #============================================================================
+  # Perfect for:
+  #   - Static websites (nginx, Apache)
+  #   - Node.js applications
+  #   - Python Flask/Django apps
+  #   - PHP applications
+  #   - Reverse proxies (nginx, Traefik)
+  #
+  # After provisioning, you can:
+  #   1. SSH in: ssh -i output/simple-webserver/simple-webserver.pem ansible@10.0.10.10
+  #   2. Install nginx: sudo apt install -y nginx
+  #   3. Open port 80: sudo ufw allow 80/tcp
+  #   4. Open port 443: sudo ufw allow 443/tcp
+  #============================================================================
+
+  - id: 200
+    host: 10.22.11.6 # Your Proxmox host IP
+    hostname: webserver-01
+    ip: 10.0.10.10/16
+    provision_type: unprivileged # Most secure - no device passthrough
+    memory: 2048 # 2GB RAM
+    cores: 2 # 2 CPU cores
+    rootfs: local-lvm:20 # 20GB disk on local LVM
+
+
+  #============================================================================
+  # OPTIONAL: Add more web servers for load balancing
+  #============================================================================
+  # - id: 201
+  #   host: 10.22.11.7
+  #   hostname: webserver-02
+  #   ip: 10.0.10.11/16
+  #   provision_type: unprivileged
+  #   memory: 2048
+  #   cores: 2
+  #   rootfs: local-lvm:20
+
+  # - id: 202
+  #   host: 10.22.11.8
+  #   hostname: webserver-03
+  #   ip: 10.0.10.12/16
+  #   provision_type: unprivileged
+  #   memory: 2048
+  #   cores: 2
+  #   rootfs: local-lvm:20

@@ -1,0 +1,195 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - DOWNLOAD TEMPLATES
+#==============================================================================
+# Downloads Ubuntu LXC container templates to the gold-public storage.
+#
+# USAGE:
+#   # Download all templates (22.04, 24.04, 25.04):
+#   ansible-playbook -i inventories/hosts.ini playbooks/download-templates.yml
+#
+#   # Download specific version only:
+#   ansible-playbook -i inventories/hosts.ini playbooks/download-templates.yml \
+#     -e "template_versions=['24.04']"
+#
+#   # Download to different storage:
+#   ansible-playbook -i inventories/hosts.ini playbooks/download-templates.yml \
+#     -e template_storage=local
+#
+# TEMPLATES DOWNLOADED:
+#   - Ubuntu 22.04 LTS (Jammy Jellyfish)
+#   - Ubuntu 24.04 LTS (Noble Numbat)
+#   - Ubuntu 25.04 (Plucky Puffin)
+#==============================================================================
+
+- name: Download Ubuntu LXC templates to Proxmox storage
+  hosts: proxmox_hosts
+  become: true
+  gather_facts: true
+
+  vars:
+    # Storage to download templates to (override with -e template_storage=xxx)
+    template_storage: "{{ ubuntu_templates.storage | default('gold-public') }}"
+
+    # Versions to download (override with -e "template_versions=['24.04']")
+    template_versions:
+      - "22.04"
+      - "24.04"
+      - "25.04"
+
+    # Template definitions
+    templates:
+      "22.04":
+        url: "http://download.proxmox.com/images/system/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+        filename: "ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+        description: "Ubuntu 22.04 LTS (Jammy Jellyfish)"
+      "24.04":
+        url: "http://download.proxmox.com/images/system/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+        filename: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+        description: "Ubuntu 24.04 LTS (Noble Numbat)"
+      "25.04":
+        url: "http://download.proxmox.com/images/system/ubuntu-25.04-standard_25.04-1_amd64.tar.zst"
+        filename: "ubuntu-25.04-standard_25.04-1_amd64.tar.zst"
+        description: "Ubuntu 25.04 (Plucky Puffin)"
+
+  pre_tasks:
+    - name: Assert running on Proxmox (Debian)
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+        fail_msg: "This playbook must run against Proxmox (Debian) hosts."
+
+    - name: Verify template storage exists
+      ansible.builtin.shell: |
+        if pvesm status | grep -q "^{{ template_storage }} "; then
+          echo "Storage '{{ template_storage }}' exists"
+          exit 0
+        else
+          echo "ERROR: Storage '{{ template_storage }}' not found!"
+          echo "Available storage backends:"
+          pvesm status
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Get template storage path
+      ansible.builtin.shell: |
+        pvesm path {{ template_storage }}:vztmpl/dummy.tar.zst 2>/dev/null | sed 's|/dummy.tar.zst$||' || \
+        echo "/mnt/pve/{{ template_storage }}/template/cache"
+      args:
+        executable: /bin/bash
+      register: template_path_result
+      changed_when: false
+
+    - name: Set template directory path
+      ansible.builtin.set_fact:
+        template_dir: "{{ template_path_result.stdout | trim }}"
+
+    - name: Display template download plan
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║        UBUNTU LXC TEMPLATE DOWNLOAD PLAN                         ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ Target Storage: {{ template_storage | default('N/A') }}
+          ║ Template Path:  {{ template_dir }}
+          ║ Versions to download:
+          {% for ver in template_versions %}
+          ║   - {{ templates[ver].description }}
+          {% endfor %}
+          ╚══════════════════════════════════════════════════════════════════╝
+
+  tasks:
+    - name: Ensure template directory exists
+      ansible.builtin.file:
+        path: "{{ template_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Check existing templates
+      ansible.builtin.stat:
+        path: "{{ template_dir }}/{{ templates[item].filename }}"
+      loop: "{{ template_versions }}"
+      register: existing_templates
+
+    - name: Display existing template status
+      ansible.builtin.debug:
+        msg: "{{ templates[item.item].description }}: {{ 'EXISTS' if item.stat.exists else 'WILL DOWNLOAD' }}"
+      loop: "{{ existing_templates.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Download Ubuntu templates
+      ansible.builtin.get_url:
+        url: "{{ templates[item.item].url }}"
+        dest: "{{ template_dir }}/{{ templates[item.item].filename }}"
+        mode: '0644'
+        timeout: 600
+      loop: "{{ existing_templates.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: not item.stat.exists
+      register: download_results
+      retries: 3
+      delay: 10
+      until: download_results is succeeded
+
+    - name: Verify downloaded templates
+      ansible.builtin.shell: |
+        template_file="{{ template_dir }}/{{ templates[item].filename }}"
+        if [ -f "$template_file" ]; then
+          size=$(stat -c%s "$template_file")
+          if [ "$size" -gt 100000000 ]; then
+            echo "✓ {{ templates[item].description }} - $(numfmt --to=iec $size)"
+            exit 0
+          else
+            echo "✗ {{ templates[item].description }} - File too small ($size bytes), may be corrupted"
+            exit 1
+          fi
+        else
+          echo "✗ {{ templates[item].description }} - File not found!"
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      loop: "{{ template_versions }}"
+      register: verify_results
+      changed_when: false
+
+    - name: Display verification results
+      ansible.builtin.debug:
+        msg: "{{ item.stdout }}"
+      loop: "{{ verify_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: List all templates in storage
+      ansible.builtin.shell: |
+        echo "=== Templates in {{ template_storage }} ==="
+        ls -lah "{{ template_dir }}/"*.tar.* 2>/dev/null || echo "No templates found"
+      args:
+        executable: /bin/bash
+      register: template_list
+      changed_when: false
+
+    - name: Display template list
+      ansible.builtin.debug:
+        msg: "{{ template_list.stdout_lines }}"
+
+  post_tasks:
+    - name: Summary
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════════════╗
+          ║        TEMPLATE DOWNLOAD COMPLETE                                ║
+          ╠══════════════════════════════════════════════════════════════════╣
+          ║ Templates are now available at:                                  ║
+          ║   {{ template_dir }}
+          ║                                                                  ║
+          ║ To use in container maps, reference templates as:                ║
+          {% for ver in template_versions %}
+          ║   {{ template_storage }}:vztmpl/{{ templates[ver].filename }}
+          {% endfor %}
+          ╚══════════════════════════════════════════════════════════════════╝

@@ -1,0 +1,190 @@
+---
+#==============================================================================
+# PROXMOX UBUNTU LXC PROVISIONER - GLOBAL GROUP VARIABLES (EXAMPLE)
+#==============================================================================
+# Copy this file to all.yml and customize for your environment:
+#   cp all.yml.example all.yml
+#
+# These defaults apply to all hosts. Override in host_vars or container maps.
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# PROXMOX DEFAULTS
+#------------------------------------------------------------------------------
+proxmox_defaults:
+  # Network configuration - CUSTOMIZE FOR YOUR ENVIRONMENT
+  bridge: vmbr0
+  vlan_tag: 0
+  gateway: 192.168.1.1      # Your network gateway
+  mtu: 1500
+  dns: "1.1.1.1"            # DNS server (Cloudflare)
+
+  # Default filesystem for storage volumes
+  storage_defaults:
+    fstype: xfs # Options: ext4, xfs (xfs recommended for large volumes)
+
+#------------------------------------------------------------------------------
+# UBUNTU LXC TEMPLATE CONFIGURATION
+#------------------------------------------------------------------------------
+ubuntu_templates:
+  # Template storage location (Proxmox storage ID)
+  # Run 'pvesm status' to list available storage on your hosts
+  storage: "local"
+
+  # Available Ubuntu versions
+  versions:
+    "22.04":
+      url: "http://download.proxmox.com/images/system/ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+      filename: "ubuntu-22.04-standard_22.04-1_amd64.tar.zst"
+    "24.04":
+      url: "http://download.proxmox.com/images/system/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+      filename: "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+    "25.04":
+      url: "http://download.proxmox.com/images/system/ubuntu-25.04-standard_25.04-1_amd64.tar.zst"
+      filename: "ubuntu-25.04-standard_25.04-1_amd64.tar.zst"
+
+  # Default version to use
+  default_version: "24.04"
+
+#------------------------------------------------------------------------------
+# STORAGE BACKENDS (Available on Proxmox hosts)
+#------------------------------------------------------------------------------
+# Run 'pvesm status' on your Proxmox host to list available storage.
+# Customize this section for your environment.
+#
+storage_backends:
+  # Local LVM storage (typically available on all hosts)
+  local_lvm:
+    id: "local-lvm"
+    type: "lvm"
+    description: "Local LVM storage on each Proxmox host"
+
+  # Local directory storage (for templates)
+  local:
+    id: "local"
+    type: "dir"
+    description: "Local directory storage for templates and ISOs"
+
+  # Example: Ceph RBD storage (uncomment and customize if you have Ceph)
+  # ceph_pool:
+  #   id: "ceph-pool"
+  #   type: "rbd"
+  #   description: "Ceph RBD storage pool"
+
+  # Example: NFS storage (uncomment and customize if you have NFS)
+  # nfs_data:
+  #   id: "nfs-data"
+  #   type: "nfs"
+  #   description: "NFS storage for data"
+
+  # Example: ZFS storage on specific host (uncomment and customize)
+  # zfs_pool:
+  #   id: "zfs-pool"
+  #   type: "zfs"
+  #   description: "ZFS storage pool"
+  #   restricted_to: "192.168.1.10"
+
+#------------------------------------------------------------------------------
+# PROVISION TYPES
+#------------------------------------------------------------------------------
+# Three types of LXC provisioning available:
+#
+# 1. unprivileged - Most secure, no device passthrough
+#    - Uses: --unprivileged 1
+#    - Good for: web apps, services, general workloads
+#
+# 2. privileged - Full device access, no GPU
+#    - Uses: --unprivileged 0 with device mounts
+#    - Good for: Docker, Kubernetes, system services
+#
+# 3. nvidia_gpu - Full GPU passthrough with NVIDIA drivers
+#    - Uses: --unprivileged 0 with GPU device mounts
+#    - Good for: ML/AI workloads, GPU compute
+#
+provision_types:
+  unprivileged:
+    description: "Unprivileged container - most secure, no device passthrough"
+    unprivileged: true
+    install_nvidia_drivers: false
+
+  privileged:
+    description: "Privileged container - full device access, no GPU"
+    unprivileged: false
+    install_nvidia_drivers: false
+
+  nvidia_gpu:
+    description: "Privileged container with NVIDIA GPU passthrough"
+    unprivileged: false
+    install_nvidia_drivers: true
+
+#------------------------------------------------------------------------------
+# NVIDIA DRIVER CONFIGURATION (only for nvidia_gpu provision type)
+#------------------------------------------------------------------------------
+# The driver version should match your Proxmox host's NVIDIA driver.
+# Run 'nvidia-smi' on your Proxmox host to check the installed version.
+# Leave driver_version empty to auto-detect from the host.
+#
+nvidia:
+  driver_version: ""        # Auto-detect, or specify: "550.54.14"
+  driver_url_base: "https://us.download.nvidia.com/XFree86/Linux-x86_64"
+
+#------------------------------------------------------------------------------
+# SECURITY DEFAULTS
+#------------------------------------------------------------------------------
+security:
+  # UFW firewall (enabled by default)
+  ufw_enabled: true
+  ufw_default_rules:
+    - { rule: "allow", port: 22, proto: "tcp", comment: "SSH" }
+    - { rule: "allow", proto: "icmp", comment: "ICMP/Ping" }
+
+  # Disable all telemetry
+  disable_telemetry: true
+
+  # Automatic security updates
+  auto_security_updates: true
+
+#------------------------------------------------------------------------------
+# SSH KEY CONFIGURATION
+#------------------------------------------------------------------------------
+ssh:
+  # Key type for generated keys
+  key_type: "ed25519"
+  key_bits: 4096 # Only used for RSA
+
+  # Output directory for generated keys and inventory (relative to playbook)
+  output_dir: "../output"
+
+#------------------------------------------------------------------------------
+# SYSTEM CONFIGURATION
+#------------------------------------------------------------------------------
+system:
+  # Timezone
+  timezone: "UTC"
+
+  # Locale
+  locale: "en_US.UTF-8"
+
+  # Packages to install in all containers
+  base_packages:
+    - curl
+    - wget
+    - vim
+    - htop
+    - git
+    - jq
+    - unzip
+    - ca-certificates
+    - gnupg
+    - lsb-release
+    - sudo
+    - rsync
+    - openssh-server
+
+#------------------------------------------------------------------------------
+# ANSIBLE CONNECTION DEFAULTS
+#------------------------------------------------------------------------------
+ansible_user: root
+ansible_ssh_private_key_file: "~/.ssh/id_ed25519"
+ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+ansible_python_interpreter: "/usr/bin/python3"
